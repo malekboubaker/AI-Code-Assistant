@@ -1,0 +1,2 @@
+[TASK: bug_fix]
+Fix the provided code. Preserve intent and return the corrected code plus a concise explanation.

@@ -1,0 +1,2 @@
+[TASK: perf_opt]
+Optimize the provided code for performance without changing behavior.

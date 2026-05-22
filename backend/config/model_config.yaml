@@ -1,0 +1,10 @@
+active_provider: pretrained_qwen
+providers:
+  pretrained_qwen:
+    runtime: ollama
+    model: qwen3:8b
+    base_url: http://localhost:11434
+  finetuned_qwen:
+    runtime: transformers_lora
+    base_model_path: models/pretrained/qwen
+    lora_adapter_path: models/finetuned/qwen_lora

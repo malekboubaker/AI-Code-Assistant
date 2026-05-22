@@ -1,0 +1,6 @@
+collection_name: code_chunks
+top_k: 5
+similarity_threshold: 0.60
+embedding_model: nomic-embed-text
+vector_size: 768
+store_generated_outputs: false

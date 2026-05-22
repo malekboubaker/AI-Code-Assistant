@@ -1,0 +1,9 @@
+tasks:
+  auto_complete: "[TASK: auto_complete]"
+  code_gen: "[TASK: code_gen]"
+  bug_detection: "[TASK: bug_detection]"
+  bug_fix: "[TASK: bug_fix]"
+  perf_opt: "[TASK: perf_opt]"
+  test_gen: "[TASK: test_gen]"
+  refactoring: "[TASK: refactoring]"
+  project_explain: "[TASK: project_explain]"

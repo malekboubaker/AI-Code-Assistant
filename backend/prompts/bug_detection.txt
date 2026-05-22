@@ -1,0 +1,2 @@
+[TASK: bug_detection]
+Review the provided code for bugs. Return issues with severity, location, and suggested fixes.

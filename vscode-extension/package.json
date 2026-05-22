@@ -1,0 +1,159 @@
+{
+  "name": "ai-code-assistant-local",
+  "displayName": "AI Code Assistant Local",
+  "description": "Local-only VS Code integration for the AI Code Assistant backend.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:aiCodeAssistant.chatView",
+    "onCommand:aiCodeAssistant.openChat",
+    "onCommand:aiCodeAssistant.generateCode",
+    "onCommand:aiCodeAssistant.fixBug",
+    "onCommand:aiCodeAssistant.refactorSelection",
+    "onCommand:aiCodeAssistant.optimizePerformance",
+    "onCommand:aiCodeAssistant.generateUnitTests",
+    "onCommand:aiCodeAssistant.explainProjectCode"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiCodeAssistant",
+          "title": "AI Code Assistant",
+          "icon": "resources/ai-code-assistant.svg"
+        }
+      ]
+    },
+    "views": {
+      "aiCodeAssistant": [
+        {
+          "id": "aiCodeAssistant.chatView",
+          "name": "AI Code Assistant",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "aiCodeAssistant.openChat",
+        "title": "AI Code Assistant: Open Chat"
+      },
+      {
+        "command": "aiCodeAssistant.generateCode",
+        "title": "AI Code Assistant: Generate Code"
+      },
+      {
+        "command": "aiCodeAssistant.fixBug",
+        "title": "AI Code Assistant: Fix Bug"
+      },
+      {
+        "command": "aiCodeAssistant.refactorSelection",
+        "title": "AI Code Assistant: Refactor Selection"
+      },
+      {
+        "command": "aiCodeAssistant.optimizePerformance",
+        "title": "AI Code Assistant: Optimize Performance"
+      },
+      {
+        "command": "aiCodeAssistant.generateUnitTests",
+        "title": "AI Code Assistant: Generate Unit Tests"
+      },
+      {
+        "command": "aiCodeAssistant.explainProjectCode",
+        "title": "AI Code Assistant: Explain Project Code"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "aiCodeAssistant.fixBug",
+          "when": "editorHasSelection",
+          "group": "aiCodeAssistant@1"
+        },
+        {
+          "command": "aiCodeAssistant.refactorSelection",
+          "when": "editorHasSelection",
+          "group": "aiCodeAssistant@2"
+        },
+        {
+          "command": "aiCodeAssistant.optimizePerformance",
+          "when": "editorHasSelection",
+          "group": "aiCodeAssistant@3"
+        },
+        {
+          "command": "aiCodeAssistant.generateUnitTests",
+          "when": "editorHasSelection",
+          "group": "aiCodeAssistant@4"
+        },
+        {
+          "command": "aiCodeAssistant.explainProjectCode",
+          "when": "editorHasSelection",
+          "group": "aiCodeAssistant@5"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AI Code Assistant Local",
+      "properties": {
+        "aiCodeAssistant.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8000/api/v1/generate",
+          "description": "Local FastAPI generate endpoint. Only localhost URLs are allowed."
+        },
+        "aiCodeAssistant.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "Timeout for localhost backend requests in milliseconds."
+        },
+        "aiCodeAssistant.chat.useRag": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use local RAG for sidebar chat requests."
+        },
+        "aiCodeAssistant.chat.includeCursorContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "When no text is selected, include nearby active editor text in sidebar chat requests."
+        },
+        "aiCodeAssistant.chat.maxContextLines": {
+          "type": "number",
+          "default": 80,
+          "minimum": 1,
+          "description": "Maximum active editor lines to send as cursor context when no text is selected."
+        },
+        "aiCodeAssistant.chat.autoApplyChanges": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reserved safety setting. Generated code is never applied unless the user clicks Apply."
+        },
+        "aiCodeAssistant.chat.showTimingMetadata": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show backend timing metadata in sidebar chat responses for debugging."
+        },
+        "aiCodeAssistant.useRagForCodeTasks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable local RAG for code generation/fix/refactor/optimization/test commands."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}

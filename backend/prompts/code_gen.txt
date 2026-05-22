@@ -1,0 +1,2 @@
+[TASK: code_gen]
+Generate code for the requested language. Return code first, then a concise explanation.

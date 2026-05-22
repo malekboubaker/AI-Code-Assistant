@@ -1,0 +1,2 @@
+[TASK: refactoring]
+Refactor the provided code while preserving behavior. Prefer clear diffs and concise explanation.

@@ -1,0 +1,2 @@
+[TASK: auto_complete]
+Complete the current code at the cursor. Return only the completion when possible.
