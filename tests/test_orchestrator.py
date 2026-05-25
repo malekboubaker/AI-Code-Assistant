@@ -1,6 +1,7 @@
 from backend.agent.orchestrator import AgentOrchestrator
 from backend.agent.rag_controller import RagControllerAgent
 from backend.api.schemas import GenerateRequest, RagSource
+from backend.rag.project_identity import project_id_for_path
 
 
 class FakeModel:
@@ -87,6 +88,10 @@ def test_orchestrator_runs_without_rag():
     assert response.metadata["timing_rag_ms"] >= 0
     assert response.metadata["timing_model_ms"] >= 0
     assert response.metadata["timing_validation_ms"] >= 0
+    assert response.metadata["validator_used"] == "python"
+    assert response.metadata["validation_duration_ms"] >= 0
+    assert response.metadata["validation_errors"] == []
+    assert isinstance(response.metadata["validation_warnings"], list)
 
 
 def test_auto_complete_uses_short_generation_and_skips_default_rag():
@@ -262,7 +267,8 @@ class PromptCapturingModel:
 
 
 class RelevantRetriever:
-    def search(self, query, top_k=None):
+    def search(self, query, top_k=None, project_path=None, **kwargs):
+        project_id = project_id_for_path(project_path)
         return [
             RagSource(
                 content="class AgentOrchestrator:\n    def run(self, request): pass",
@@ -272,12 +278,25 @@ class RelevantRetriever:
                 start_line=1,
                 end_line=2,
                 symbol_name="AgentOrchestrator",
-            )
+                metadata={"project_id": project_id},
+            ),
+            RagSource(
+                content="Project map summary:\n- Project type: Python\n- Entry points: backend/agent/orchestrator.py",
+                score=0.62,
+                language="text",
+                file_path="project_map.json",
+                start_line=1,
+                end_line=2,
+                chunk_type="project_map",
+                symbol_name="project_map",
+                metadata={"source": "project_map", "project_id": project_id},
+            ),
         ]
 
 
 class TypeScriptRetriever:
-    def search(self, query, top_k=None, language=None):
+    def search(self, query, top_k=None, language=None, project_path=None, **kwargs):
+        project_id = project_id_for_path(project_path)
         return [
             RagSource(
                 content="export function requestHandler(req: Request) {\n  return handle(req);\n}",
@@ -287,7 +306,19 @@ class TypeScriptRetriever:
                 start_line=1,
                 end_line=3,
                 symbol_name="requestHandler",
-            )
+                metadata={"project_id": project_id},
+            ),
+            RagSource(
+                content="Project map summary:\n- Project type: Node.js\n- Entry points: src/requestHandler.ts",
+                score=0.61,
+                language="text",
+                file_path="project_map.json",
+                start_line=1,
+                end_line=2,
+                chunk_type="project_map",
+                symbol_name="project_map",
+                metadata={"source": "project_map", "project_id": project_id},
+            ),
         ]
 
 
@@ -302,6 +333,7 @@ def test_orchestrator_injects_rag_context_above_threshold():
         GenerateRequest(
             instruction="orchestrator task router prompt builder",
             language="python",
+            project_path=".",
             use_rag=True,
         )
     )
@@ -340,10 +372,11 @@ def test_orchestrator_project_explain_uses_rag_without_generated_code():
             instruction=(
                 "Explain how AgentOrchestrator coordinates TaskRouterAgent and "
                 "PromptBuilderAgent in this project. Do not generate code."
-            ),
-            language="python",
-            use_rag=True,
-        )
+                ),
+                language="python",
+                project_path=".",
+                use_rag=True,
+            )
     )
 
     assert response.task == "project_explain"
@@ -374,6 +407,7 @@ def test_orchestrator_project_explain_supports_non_python_files():
             instruction="Explain this request handler",
             language="typescript",
             file_path="src/requestHandler.ts",
+            project_path=".",
             use_rag=True,
         )
     )

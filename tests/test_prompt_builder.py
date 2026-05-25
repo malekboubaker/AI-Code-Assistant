@@ -33,7 +33,10 @@ def test_prompt_builder_explain_task_forbids_code_generation():
     assert "Explain the retrieved code." in prompt
     assert "Do not generate code." in prompt
     assert "Do not invent classes/functions." in prompt
-    assert "Use only the retrieved project context when it is relevant." in prompt
+    assert "Use only the retrieved project context." in prompt
+    assert "Do not guess missing architecture." in prompt
+    assert "Do not mention technologies unless they appear in the retrieved files." in prompt
+    assert "If the retrieved context is insufficient, say that clearly." in prompt
     assert "Put the answer in explanation." in prompt
     assert "Return prose explanation only" in prompt
     assert "Return executable code only" not in prompt

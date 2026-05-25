@@ -62,6 +62,10 @@ class ResponseFormatterAgent:
                 "rag_best_score": rag.best_score,
                 "rag_threshold": rag.threshold,
                 "rag_skip_reason": rag.skip_reason,
+                "validator_used": validation.validator,
+                "validation_duration_ms": validation.duration_ms,
+                "validation_errors": validation.errors,
+                "validation_warnings": validation.warnings,
                 **(metadata or {}),
             },
         )

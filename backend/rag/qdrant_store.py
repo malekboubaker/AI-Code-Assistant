@@ -53,11 +53,43 @@ class QdrantStore:
     def collection_info(self) -> dict[str, Any]:
         return self._request_json("GET", f"/collections/{self.collection_name}")
 
-    def point_count(self) -> int | None:
+    def point_count(self, project_id: str | None = None) -> int | None:
+        if project_id:
+            return self.count_by_filter({"project_id": project_id})
         try:
             return int(self.collection_info().get("result", {}).get("points_count", 0))
         except Exception:
             return None
+
+    def count_by_filter(self, filters: dict[str, Any]) -> int:
+        if self._client is not None:
+            try:
+                from qdrant_client.http.models import FieldCondition, Filter, MatchValue
+
+                result = self._client.count(
+                    collection_name=self.collection_name,
+                    count_filter=Filter(
+                        must=[
+                            FieldCondition(key=key, match=MatchValue(value=value))
+                            for key, value in filters.items()
+                        ]
+                    ),
+                    exact=True,
+                )
+                return int(result.count)
+            except Exception:
+                logger.debug("qdrant_client count failed; using REST/fallback.", exc_info=True)
+                self._client = None
+        try:
+            raw = self._request_json(
+                "POST",
+                f"/collections/{self.collection_name}/points/count",
+                {"filter": _qdrant_filter(filters), "exact": True},
+            )
+            return int(raw.get("result", {}).get("count", 0))
+        except Exception:
+            pass
+        return sum(1 for row in self._fallback_rows() if _payload_matches(row.get("payload", {}), filters))
 
     def vector_size(self) -> int | None:
         try:
@@ -121,10 +153,19 @@ class QdrantStore:
             handle.write(json.dumps({"id": point_id, "vector": vector, "payload": payload}) + "\n")
         return point_id
 
-    def delete_by_file_path(self, file_path: str) -> int:
-        return self.delete_by_payload("file_path", file_path)
+    def delete_by_file_path(self, file_path: str, project_id: str | None = None) -> int:
+        filters = {"file_path": file_path}
+        if project_id:
+            filters["project_id"] = project_id
+        return self.delete_by_filter(filters)
 
     def delete_by_payload(self, key: str, value: str) -> int:
+        return self.delete_by_filter({key: value})
+
+    def delete_by_project_id(self, project_id: str) -> int:
+        return self.delete_by_filter({"project_id": project_id})
+
+    def delete_by_filter(self, filters: dict[str, Any]) -> int:
         deleted = 0
         if self._client is not None:
             try:
@@ -133,7 +174,12 @@ class QdrantStore:
                 self._client.delete(
                     collection_name=self.collection_name,
                     points_selector=FilterSelector(
-                        filter=Filter(must=[FieldCondition(key=key, match=MatchValue(value=value))])
+                        filter=Filter(
+                            must=[
+                                FieldCondition(key=key, match=MatchValue(value=value))
+                                for key, value in filters.items()
+                            ]
+                        )
                     ),
                     wait=True,
                 )
@@ -146,21 +192,29 @@ class QdrantStore:
                 self._request_json(
                     "POST",
                     f"/collections/{self.collection_name}/points/delete?wait=true",
-                    {"filter": {"must": [{"key": key, "match": {"value": value}}]}},
+                    {"filter": _qdrant_filter(filters)},
                 )
                 deleted = -1
             except Exception:
                 logger.debug("Qdrant REST delete failed; updating fallback vector file if present.", exc_info=True)
-        return self._delete_from_fallback(key, value) if self.fallback_path.exists() else deleted
+        return self._delete_from_fallback(filters) if self.fallback_path.exists() else deleted
 
-    def search(self, vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
+    def search(self, vector: list[float], top_k: int = 5, project_id: str | None = None) -> list[dict[str, Any]]:
         if self._client is not None:
             try:
+                query_filter = None
+                if project_id:
+                    from qdrant_client.http.models import FieldCondition, Filter, MatchValue
+
+                    query_filter = Filter(
+                        must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+                    )
                 hits = self._client.search(
                     collection_name=self.collection_name,
                     query_vector=vector,
                     limit=top_k,
                     with_payload=True,
+                    query_filter=query_filter,
                 )
                 return [
                     {"id": str(hit.id), "score": float(hit.score), "payload": dict(hit.payload or {})}
@@ -170,7 +224,7 @@ class QdrantStore:
                 logger.warning("qdrant_client search failed; using REST fallback.", exc_info=True)
                 self._client = None
         try:
-            raw = self.search_raw(vector, top_k)
+            raw = self.search_raw(vector, top_k, project_id=project_id)
             hits = raw.get("result", [])
             return [
                 {"id": str(hit.get("id")), "score": float(hit.get("score", 0.0)), "payload": dict(hit.get("payload") or {})}
@@ -186,6 +240,8 @@ class QdrantStore:
                 if not line.strip():
                     continue
                 item = json.loads(line)
+                if project_id and str(item.get("payload", {}).get("project_id")) != project_id:
+                    continue
                 rows.append(
                     {
                         "id": item["id"],
@@ -195,10 +251,16 @@ class QdrantStore:
                 )
         return sorted(rows, key=lambda row: row["score"], reverse=True)[:top_k]
 
-    def keyword_search(self, symbols: list[str], file_fragments: set[str], limit: int = 50) -> list[dict[str, Any]]:
+    def keyword_search(
+        self,
+        symbols: list[str],
+        file_fragments: set[str],
+        limit: int = 50,
+        project_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         if not symbols and not file_fragments:
             return []
-        rows = self._scroll_payload_rows(limit=max(limit * 4, 200))
+        rows = self._scroll_payload_rows(limit=max(limit * 4, 200), project_id=project_id)
         matches = []
         for row in rows:
             payload = row.get("payload", {})
@@ -208,7 +270,10 @@ class QdrantStore:
             folder = str(payload.get("folder") or "").replace("\\", "/").lower()
             imports = " ".join(str(item) for item in payload.get("imports") or []).lower()
             called = " ".join(str(item) for item in payload.get("called_functions") or []).lower()
-            search_blob = " ".join([content, symbol_name, file_path, folder, imports, called])
+            dependencies = " ".join(str(item) for item in payload.get("dependency_neighbors") or []).lower()
+            frameworks = " ".join(str(item) for item in payload.get("frameworks") or []).lower()
+            project_types = " ".join(str(item) for item in payload.get("project_types") or []).lower()
+            search_blob = " ".join([content, symbol_name, file_path, folder, imports, called, dependencies, frameworks, project_types])
             symbol_match = any(symbol.lower() in search_blob for symbol in symbols)
             path_match = any(fragment and fragment in file_path for fragment in file_fragments)
             if symbol_match or path_match:
@@ -217,17 +282,41 @@ class QdrantStore:
                 break
         return matches
 
-    def scroll_payload_rows(self, limit: int = 2000) -> list[dict[str, Any]]:
-        return self._scroll_payload_rows(limit=limit)
+    def scroll_payload_rows(
+        self,
+        limit: int = 2000,
+        project_id: str | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._scroll_payload_rows(limit=limit, project_id=project_id, filters=filters)
 
-    def _scroll_payload_rows(self, limit: int = 200) -> list[dict[str, Any]]:
+    def _scroll_payload_rows(
+        self,
+        limit: int = 200,
+        project_id: str | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        combined_filters = dict(filters or {})
+        if project_id:
+            combined_filters["project_id"] = project_id
         if self._client is not None:
             try:
+                scroll_filter = None
+                if combined_filters:
+                    from qdrant_client.http.models import FieldCondition, Filter, MatchValue
+
+                    scroll_filter = Filter(
+                        must=[
+                            FieldCondition(key=key, match=MatchValue(value=value))
+                            for key, value in combined_filters.items()
+                        ]
+                    )
                 points, _ = self._client.scroll(
                     collection_name=self.collection_name,
                     limit=limit,
                     with_payload=True,
                     with_vectors=False,
+                    scroll_filter=scroll_filter,
                 )
                 return [
                     {"id": str(point.id), "payload": dict(point.payload or {})}
@@ -247,6 +336,8 @@ class QdrantStore:
                 }
                 if offset is not None:
                     payload["offset"] = offset
+                if combined_filters:
+                    payload["filter"] = _qdrant_filter(combined_filters)
                 raw = self._request_json("POST", f"/collections/{self.collection_name}/points/scroll", payload)
                 result = raw.get("result", {})
                 points = result.get("points", [])
@@ -268,12 +359,14 @@ class QdrantStore:
                 if not line.strip():
                     continue
                 item = json.loads(line)
+                if combined_filters and not _payload_matches(item.get("payload", {}), combined_filters):
+                    continue
                 rows.append({"id": item.get("id"), "payload": item.get("payload", {})})
                 if len(rows) >= limit:
                     break
         return rows
 
-    def _delete_from_fallback(self, key: str, value: str) -> int:
+    def _delete_from_fallback(self, filters: dict[str, Any]) -> int:
         kept: list[dict[str, Any]] = []
         deleted = 0
         if not self.fallback_path.exists():
@@ -283,7 +376,7 @@ class QdrantStore:
                 if not line.strip():
                     continue
                 item = json.loads(line)
-                if str(item.get("payload", {}).get(key)) == value:
+                if _payload_matches(item.get("payload", {}), filters):
                     deleted += 1
                 else:
                     kept.append(item)
@@ -292,15 +385,29 @@ class QdrantStore:
                 handle.write(json.dumps(item) + "\n")
         return deleted
 
-    def search_raw(self, vector: list[float], top_k: int = 5) -> dict[str, Any]:
+    def search_raw(self, vector: list[float], top_k: int = 5, project_id: str | None = None) -> dict[str, Any]:
         payload = {"vector": vector, "limit": top_k, "with_payload": True}
+        if project_id:
+            payload["filter"] = _qdrant_filter({"project_id": project_id})
         try:
             return self._request_json("POST", f"/collections/{self.collection_name}/points/search", payload)
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
                 raise
             query_payload = {"query": vector, "limit": top_k, "with_payload": True}
+            if project_id:
+                query_payload["filter"] = _qdrant_filter({"project_id": project_id})
             return self._request_json("POST", f"/collections/{self.collection_name}/points/query", query_payload)
+
+    def _fallback_rows(self) -> list[dict[str, Any]]:
+        if not self.fallback_path.exists():
+            return []
+        rows = []
+        with self.fallback_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    rows.append(json.loads(line))
+        return rows
 
     def _request_json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         url = settings.qdrant_url.rstrip("/") + path
@@ -325,3 +432,11 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     if left_norm == 0 or right_norm == 0:
         return 0.0
     return dot / (left_norm * right_norm)
+
+
+def _qdrant_filter(filters: dict[str, Any]) -> dict[str, Any]:
+    return {"must": [{"key": key, "match": {"value": value}} for key, value in filters.items()]}
+
+
+def _payload_matches(payload: dict[str, Any], filters: dict[str, Any]) -> bool:
+    return all(str(payload.get(key)) == str(value) for key, value in filters.items())

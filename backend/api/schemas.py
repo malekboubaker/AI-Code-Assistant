@@ -52,6 +52,9 @@ class ValidationResult(BaseModel):
     syntax_valid: bool | None = None
     tests_passed: bool | None = None
     warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    validator: str = "unknown"
+    duration_ms: int = 0
 
 
 class GenerateResponse(BaseModel):

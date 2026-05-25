@@ -17,6 +17,8 @@ def main() -> None:
     args = parser.parse_args()
     report = index_project_report(args.project_path, max_files=args.max_files, full=args.full)
     print("AI Code Assistant RAG indexing complete")
+    print(f"Project id: {report.project_id}")
+    print(f"Project path: {report.project_path}")
     print(f"Files scanned: {report.files_scanned}")
     print(f"Files skipped: {report.files_skipped}")
     if report.skipped_by_reason:
