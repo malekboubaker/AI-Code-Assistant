@@ -30,6 +30,7 @@ export function registerChatView(context: vscode.ExtensionContext): void {
 class ChatViewProvider implements vscode.WebviewViewProvider {
   private webviewView?: vscode.WebviewView;
   private responseCounter = 0;
+  private lastBackendResponse?: GenerateResponse;
   private readonly pendingApply = new Map<string, PendingApply>();
   private readonly previewProvider = new GeneratedCodePreviewProvider();
 
@@ -66,6 +67,11 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async sendChatRequest(instruction: string): Promise<void> {
+    if (isSourceListingRequest(instruction)) {
+      this.postPreviousSources();
+      return;
+    }
+
     const editorContext = collectEditorContext();
     const config = vscode.workspace.getConfiguration('aiCodeAssistant');
     const endpoint = config.get<string>('backendUrl', 'http://localhost:8000/api/v1/generate');
@@ -93,6 +99,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       const response = await client.generate(request);
+      this.lastBackendResponse = response;
       const responseId = this.nextResponseId();
       if (response.generated_code.trim()) {
         this.pendingApply.set(responseId, { context: editorContext, response });
@@ -108,6 +115,17 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       this.postError(formatBackendError(error));
     }
+  }
+
+  private postPreviousSources(): void {
+    const sources = this.lastBackendResponse?.rag_sources ?? [];
+    this.postMessage({
+      type: 'sources',
+      sources,
+      message: sources.length
+        ? 'Sources used for the previous response.'
+        : 'No RAG sources are available for the previous response.'
+    });
   }
 
   private async applyGeneratedCode(responseId: string): Promise<void> {
@@ -231,4 +249,21 @@ function formatBackendError(error: unknown): string {
     return 'Backend not running. Start python scripts/start_backend.py';
   }
   return message;
+}
+
+function isSourceListingRequest(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return false;
+  }
+  const patterns = [
+    /\blist (the )?(source files|sources)\b/,
+    /\bshow (the )?(source files|sources)\b/,
+    /\bwhich files did you use\b/,
+    /\bwhat (source files|sources) did you use\b/,
+    /\bwhat (source files|sources) did you use for (this|the) explanation\b/,
+    /\blist (the )?sources used\b/,
+    /\bsources used\b/
+  ];
+  return patterns.some((pattern) => pattern.test(normalized));
 }

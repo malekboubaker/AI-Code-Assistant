@@ -163,6 +163,30 @@ function getChatViewHtml(webview) {
       overflow-wrap: anywhere;
     }
 
+    .sources-section {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+    }
+
+    .sources-title {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    .source-item {
+      margin-top: 6px;
+      color: var(--vscode-foreground);
+      overflow-wrap: anywhere;
+    }
+
+    .source-meta {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
     .empty-state {
       color: var(--muted);
       padding: 12px;
@@ -221,7 +245,7 @@ function getChatViewHtml(webview) {
       const hasExplanation = Boolean(response.explanation && response.explanation.trim());
       const bubble = appendMessage(
         'assistant',
-        response.task ? 'Assistant · ' + response.task : 'Assistant',
+        response.task ? 'Assistant - ' + response.task : 'Assistant',
         hasExplanation ? response.explanation : (hasCode ? 'Generated code suggestion:' : 'No response text returned.')
       );
 
@@ -263,20 +287,7 @@ function getChatViewHtml(webview) {
       }
 
       if (Array.isArray(response.rag_sources) && response.rag_sources.length > 0) {
-        const details = document.createElement('details');
-        const summary = document.createElement('summary');
-        summary.textContent = 'RAG sources';
-        details.appendChild(summary);
-        for (const source of response.rag_sources) {
-          const item = document.createElement('div');
-          item.className = 'source';
-          const path = source.file_path || 'unknown';
-          const lines = source.start_line || source.end_line ? ':' + (source.start_line || '?') + '-' + (source.end_line || '?') : '';
-          const score = typeof source.score === 'number' ? ' score=' + source.score.toFixed(3) : '';
-          item.textContent = path + lines + score;
-          details.appendChild(item);
-        }
-        bubble.appendChild(details);
+        appendSourcesSection(bubble, response.rag_sources);
       }
 
       if (payload.showTiming && response.metadata) {
@@ -302,6 +313,69 @@ function getChatViewHtml(webview) {
       }
 
       messages.scrollTop = messages.scrollHeight;
+    }
+
+    function appendSourcesMessage(sources, message) {
+      const bubble = appendMessage('assistant', 'Sources used', message || 'Sources used for the previous response.');
+      if (Array.isArray(sources) && sources.length > 0) {
+        appendSourcesSection(bubble, sources);
+      }
+    }
+
+    function appendSourcesSection(container, sources) {
+      const section = document.createElement('div');
+      section.className = 'sources-section';
+      const title = document.createElement('div');
+      title.className = 'sources-title';
+      title.textContent = 'Sources used';
+      section.appendChild(title);
+
+      for (const source of sources) {
+        const item = document.createElement('div');
+        item.className = 'source-item';
+
+        const primary = document.createElement('div');
+        primary.textContent = '- ' + sourceDisplayPath(source);
+        item.appendChild(primary);
+
+        const meta = document.createElement('div');
+        meta.className = 'source-meta';
+        meta.textContent = sourceMetadataText(source);
+        item.appendChild(meta);
+
+        section.appendChild(item);
+      }
+
+      container.appendChild(section);
+    }
+
+    function sourceDisplayPath(source) {
+      const metadata = source && source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
+      return String(metadata.relative_file_path || metadata.relative_path || source.file_path || 'unknown');
+    }
+
+    function sourceMetadataText(source) {
+      const metadata = source && source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
+      const parts = [];
+      if (source.file_path) {
+        parts.push('file_path=' + source.file_path);
+      }
+      if (source.symbol_name) {
+        parts.push('symbol=' + source.symbol_name);
+      }
+      if (source.chunk_type) {
+        parts.push('type=' + source.chunk_type);
+      }
+      if (source.start_line || source.end_line) {
+        parts.push('lines=' + (source.start_line || '?') + '-' + (source.end_line || '?'));
+      }
+      if (typeof source.score === 'number') {
+        parts.push('score=' + source.score.toFixed(3));
+      }
+      if (metadata.project_id) {
+        parts.push('project_id=' + metadata.project_id);
+      }
+      return parts.join(' | ');
     }
 
     function setLoading(isLoading) {
@@ -333,6 +407,9 @@ function getChatViewHtml(webview) {
       if (message.type === 'assistant') {
         setLoading(false);
         appendAssistant(message.payload);
+      } else if (message.type === 'sources') {
+        setLoading(false);
+        appendSourcesMessage(message.sources, message.message);
       } else if (message.type === 'error') {
         setLoading(false);
         appendMessage('error', 'Error', message.message);

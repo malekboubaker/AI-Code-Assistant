@@ -14,3 +14,10 @@ def test_task_router_detects_explanation_intent():
         "Explain how AgentOrchestrator coordinates TaskRouterAgent and PromptBuilderAgent"
     )
     assert task == "project_explain"
+
+
+def test_task_router_does_not_treat_source_listing_as_code_generation():
+    router = TaskRouterAgent()
+    assert router.detect("List the source files you used for this explanation") == "project_explain"
+    assert router.detect("Which files did you use?") == "project_explain"
+    assert router.detect("Show sources") == "project_explain"

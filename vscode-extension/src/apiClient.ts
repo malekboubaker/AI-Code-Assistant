@@ -38,6 +38,7 @@ export interface RagSource {
   end_line?: number;
   chunk_type?: string;
   symbol_name?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface GenerateResponse {

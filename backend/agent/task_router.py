@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from backend.api.schemas import TaskName
 
 
@@ -27,6 +29,14 @@ KEYWORDS: list[tuple[str, TaskName]] = [
     ("write", "code_gen"),
 ]
 
+SOURCE_LISTING_PATTERNS = (
+    r"\blist\s+(?:the\s+)?(?:source\s+files|sources)\b",
+    r"\bshow\s+(?:the\s+)?(?:source\s+files|sources)\b",
+    r"\bwhich\s+files\s+did\s+you\s+use\b",
+    r"\bwhat\s+(?:source\s+files|sources)\s+did\s+you\s+use\b",
+    r"\bsources\s+used\b",
+)
+
 
 class TaskRouterAgent:
     def detect(self, instruction: str, explicit_task: TaskName | None = None) -> TaskName:
@@ -35,6 +45,8 @@ class TaskRouterAgent:
                 return "project_explain"
             return explicit_task
         lower = instruction.lower()
+        if any(re.search(pattern, lower) for pattern in SOURCE_LISTING_PATTERNS):
+            return "project_explain"
         if lower.strip().startswith(EXPLAIN_PREFIXES):
             return "project_explain"
         for keyword, task in KEYWORDS:

@@ -56,6 +56,7 @@ class ChatViewProvider {
     extensionContext;
     webviewView;
     responseCounter = 0;
+    lastBackendResponse;
     pendingApply = new Map();
     previewProvider = new GeneratedCodePreviewProvider();
     constructor(extensionContext) {
@@ -88,6 +89,10 @@ class ChatViewProvider {
         }
     }
     async sendChatRequest(instruction) {
+        if (isSourceListingRequest(instruction)) {
+            this.postPreviousSources();
+            return;
+        }
         const editorContext = (0, contextCollector_1.collectEditorContext)();
         const config = vscode.workspace.getConfiguration('aiCodeAssistant');
         const endpoint = config.get('backendUrl', 'http://localhost:8000/api/v1/generate');
@@ -113,6 +118,7 @@ class ChatViewProvider {
         };
         try {
             const response = await client.generate(request);
+            this.lastBackendResponse = response;
             const responseId = this.nextResponseId();
             if (response.generated_code.trim()) {
                 this.pendingApply.set(responseId, { context: editorContext, response });
@@ -129,6 +135,16 @@ class ChatViewProvider {
         catch (error) {
             this.postError(formatBackendError(error));
         }
+    }
+    postPreviousSources() {
+        const sources = this.lastBackendResponse?.rag_sources ?? [];
+        this.postMessage({
+            type: 'sources',
+            sources,
+            message: sources.length
+                ? 'Sources used for the previous response.'
+                : 'No RAG sources are available for the previous response.'
+        });
     }
     async applyGeneratedCode(responseId) {
         const pending = this.pendingApply.get(responseId);
@@ -224,5 +240,21 @@ function formatBackendError(error) {
         return 'Backend not running. Start python scripts/start_backend.py';
     }
     return message;
+}
+function isSourceListingRequest(text) {
+    const normalized = text.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!normalized) {
+        return false;
+    }
+    const patterns = [
+        /\blist (the )?(source files|sources)\b/,
+        /\bshow (the )?(source files|sources)\b/,
+        /\bwhich files did you use\b/,
+        /\bwhat (source files|sources) did you use\b/,
+        /\bwhat (source files|sources) did you use for (this|the) explanation\b/,
+        /\blist (the )?sources used\b/,
+        /\bsources used\b/
+    ];
+    return patterns.some((pattern) => pattern.test(normalized));
 }
 //# sourceMappingURL=chatViewProvider.js.map
