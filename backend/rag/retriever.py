@@ -6,6 +6,7 @@ import re
 from backend.api.schemas import RagSource
 from backend.config.settings import settings
 from backend.rag.embedder import LocalEmbedder
+from backend.rag.project_identity import normalize_project_path, project_id_for_path
 from backend.rag.qdrant_store import QdrantStore
 
 logger = logging.getLogger(__name__)
@@ -15,34 +16,75 @@ class Retriever:
     def __init__(self, embedder: LocalEmbedder | None = None, store: QdrantStore | None = None) -> None:
         self.embedder = embedder or LocalEmbedder()
         self.store = store or QdrantStore()
+        self.last_diagnostics: dict[str, object] = {}
 
-    def search(self, query: str, top_k: int | None = None, language: str | None = None) -> list[RagSource]:
+    def search(
+        self,
+        query: str,
+        top_k: int | None = None,
+        language: str | None = None,
+        active_file: str | None = None,
+        project_path: str | None = None,
+        task: str | None = None,
+    ) -> list[RagSource]:
+        project_id = project_id_for_path(project_path) if project_path else None
+        normalized_project_path = normalize_project_path(project_path) if project_path else None
+        if not project_id:
+            self.last_diagnostics = {
+                "project_id": None,
+                "project_path": normalized_project_path,
+                "qdrant_collection": getattr(self.store, "collection_name", "unknown"),
+                "rag_raw_results_count": 0,
+                "rag_filtered_results_count": 0,
+                "rag_sources_project_ids": [],
+                "project_map_exists": False,
+                "reliable_source_count": 0,
+                "rag_skip_reason": "missing_project_path",
+            }
+            return []
         requested_top_k = top_k or settings.rag_top_k
         vector = self.embedder.embed(query)
         symbols = extract_query_symbols(query)
         terms = extract_query_terms(query)
         file_fragments = symbol_file_fragments(symbols + terms)
-        semantic_hits = self.store.search(vector, max(requested_top_k * 20, 50))
-        keyword_hits = self.store.keyword_search(symbols + terms, file_fragments, limit=max(requested_top_k * 10, 30))
-        project_map_hits = self._project_map_hits(query)
+        semantic_hits = self.store.search(vector, max(requested_top_k * 20, 50), project_id=project_id)
+        keyword_hits = self.store.keyword_search(
+            symbols + terms,
+            file_fragments,
+            limit=max(requested_top_k * 10, 30),
+            project_id=project_id,
+        )
+        project_map_hits = self._project_map_hits(query, project_id=project_id)
+        overview_hits = self._project_overview_hits(project_id, project_map_hits) if task == "project_explain" else []
         logger.info(
             (
                 "Retriever candidates: semantic_hits=%s keyword_hits=%s project_map_hits=%s "
-                "symbols=%s terms=%s file_fragments=%s"
+                "overview_hits=%s project_id=%s symbols=%s terms=%s file_fragments=%s"
             ),
             len(semantic_hits),
             len(keyword_hits),
             len(project_map_hits),
+            len(overview_hits),
+            project_id,
             symbols,
             terms,
             sorted(file_fragments),
         )
-        hits = project_map_hits + semantic_hits + keyword_hits
-        ranked_hits = self._rank_hits(query, hits, language=language)
+        hits = project_map_hits + overview_hits + semantic_hits + keyword_hits
+        filtered_hits = [hit for hit in hits if hit.get("payload", {}).get("project_id") == project_id]
+        ranked_hits = self._rank_hits(query, hits, language=language, active_file=active_file)
         sources: list[RagSource] = []
         seen_locations: set[tuple[str | None, int | None, int | None]] = set()
         for hit in ranked_hits:
             payload = hit.get("payload", {})
+            if payload.get("project_id") != project_id:
+                logger.warning(
+                    "Skipping cross-project RAG hit: expected_project_id=%s hit_project_id=%s file_path=%s",
+                    project_id,
+                    payload.get("project_id"),
+                    payload.get("file_path"),
+                )
+                continue
             location = (payload.get("file_path"), payload.get("start_line"), payload.get("end_line"))
             if location in seen_locations:
                 logger.debug("Skipping duplicate RAG hit for location=%s", location)
@@ -66,6 +108,19 @@ class Retriever:
             )
             if len(sources) >= requested_top_k:
                 break
+        self.last_diagnostics = {
+            "project_id": project_id,
+            "project_path": normalized_project_path,
+            "qdrant_collection": getattr(self.store, "collection_name", "unknown"),
+            "rag_raw_results_count": len(hits),
+            "rag_filtered_results_count": len(filtered_hits),
+            "rag_sources_project_ids": sorted(
+                {str(source.metadata.get("project_id")) for source in sources if source.metadata.get("project_id")}
+            ),
+            "project_map_exists": _has_project_map_source(sources),
+            "reliable_source_count": _reliable_project_source_count(sources),
+            "rag_skip_reason": None if sources else "no_filtered_results",
+        }
         if sources:
             logger.info("Retriever best_score=%s source=%s", sources[0].score, sources[0].file_path)
             for source in sources:
@@ -82,7 +137,13 @@ class Retriever:
             logger.info("Retriever returned no sources for query.")
         return sources
 
-    def _rank_hits(self, query: str, hits: list[dict], language: str | None = None) -> list[dict]:
+    def _rank_hits(
+        self,
+        query: str,
+        hits: list[dict],
+        language: str | None = None,
+        active_file: str | None = None,
+    ) -> list[dict]:
         symbols = extract_query_symbols(query)
         terms = extract_query_terms(query)
         file_fragments = symbol_file_fragments(symbols + terms)
@@ -94,6 +155,8 @@ class Retriever:
             language_match = bool(language and payload.get("language") == language)
             if language_match:
                 boost += 0.08
+            boost += importance_boost(payload)
+            boost += active_file_boost(payload, active_file)
             if payload.get("source") == "project_map":
                 boost += 0.10
             adjusted = min(1.0, semantic_score + boost)
@@ -101,12 +164,27 @@ class Retriever:
             ranked_hit["semantic_score"] = semantic_score
             ranked_hit["keyword_boost"] = boost
             ranked_hit["language_match"] = language_match
+            ranked_hit["importance_score"] = safe_float(payload.get("importance_score", 0.0))
             ranked_hit["score"] = adjusted
             ranked.append(ranked_hit)
-        return sorted(ranked, key=lambda item: (item.get("score", 0.0), bool(item.get("language_match"))), reverse=True)
+        return sorted(
+            ranked,
+            key=lambda item: (
+                item.get("score", 0.0),
+                bool(item.get("language_match")),
+                item.get("importance_score", 0.0),
+            ),
+            reverse=True,
+        )
 
-    def _project_map_hits(self, query: str) -> list[dict]:
-        rows = self.store.scroll_payload_rows(limit=200)
+    def count_project_points(self, project_id: str) -> int:
+        return int(self.store.point_count(project_id=project_id) or 0)
+
+    def _project_map_hits(self, query: str, project_id: str) -> list[dict]:
+        try:
+            rows = self.store.scroll_payload_rows(limit=20, project_id=project_id, filters={"source": "project_map"})
+        except TypeError:
+            rows = self.store.scroll_payload_rows(limit=1200, project_id=project_id)
         hits = []
         for row in rows:
             payload = row.get("payload", {})
@@ -114,6 +192,40 @@ class Retriever:
                 continue
             hits.append({"id": row.get("id"), "score": project_map_score(payload, query), "payload": payload})
         return hits[:1]
+
+    def _project_overview_hits(self, project_id: str, project_map_hits: list[dict]) -> list[dict]:
+        project_map = {}
+        if project_map_hits:
+            project_map = project_map_hits[0].get("payload", {}).get("project_map") or {}
+        important = set(project_map.get("important_files", []) if isinstance(project_map, dict) else [])
+        entry_points = set(project_map.get("entry_points", []) if isinstance(project_map, dict) else [])
+        config_files = set(project_map.get("config_files", []) if isinstance(project_map, dict) else [])
+        docs = set(project_map.get("documentation_files", []) if isinstance(project_map, dict) else [])
+        wanted_paths = important | entry_points | config_files | docs
+        rows = self.store.scroll_payload_rows(limit=1200, project_id=project_id)
+        hits = []
+        for row in rows:
+            payload = row.get("payload", {})
+            if payload.get("source") != "project_code":
+                continue
+            relative = str(payload.get("relative_file_path") or payload.get("relative_path") or "")
+            if (
+                payload.get("is_doc_file")
+                or payload.get("is_config_file")
+                or payload.get("is_entry_point")
+                or relative in wanted_paths
+            ):
+                score = 0.66
+                if relative in entry_points:
+                    score += 0.08
+                if payload.get("is_doc_file"):
+                    score += 0.04
+                if payload.get("is_config_file"):
+                    score += 0.03
+                hits.append({"id": row.get("id"), "score": min(score, 0.82), "payload": payload})
+            if len(hits) >= 20:
+                break
+        return hits
 
 
 def extract_query_symbols(query: str) -> list[str]:
@@ -184,6 +296,9 @@ def keyword_boost(payload: dict, symbols: list[str], terms: list[str], file_frag
     folder = str(payload.get("folder") or "").replace("\\", "/").lower()
     imports = " ".join(str(item) for item in payload.get("imports") or []).lower()
     called = " ".join(str(item) for item in payload.get("called_functions") or []).lower()
+    dependencies = " ".join(str(item) for item in payload.get("dependency_neighbors") or []).lower()
+    frameworks = " ".join(str(item) for item in payload.get("frameworks") or []).lower()
+    project_types = " ".join(str(item) for item in payload.get("project_types") or []).lower()
     for symbol in symbols:
         query_symbol_lower = symbol.lower()
         if symbol_lower == query_symbol_lower:
@@ -198,8 +313,10 @@ def keyword_boost(payload: dict, symbols: list[str], terms: list[str], file_frag
             boost += 0.24
         if term_lower in content_lower:
             boost += 0.14
-        if term_lower in imports or term_lower in called:
+        if term_lower in imports or term_lower in called or term_lower in dependencies:
             boost += 0.12
+        if term_lower in frameworks or term_lower in project_types:
+            boost += 0.10
     for fragment in file_fragments:
         if fragment and fragment in file_path:
             boost += 0.18
@@ -214,6 +331,65 @@ def keyword_boost(payload: dict, symbols: list[str], terms: list[str], file_frag
     return min(boost, 0.60)
 
 
+def importance_boost(payload: dict) -> float:
+    importance = safe_float(payload.get("importance_score", 0.0))
+    boost = min(importance * 0.08, 0.20)
+    if payload.get("is_entry_point"):
+        boost += 0.10
+    if payload.get("imported_by_count"):
+        boost += min(safe_float(payload.get("imported_by_count", 0)) * 0.03, 0.15)
+    return min(boost, 0.30)
+
+
+def safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def active_file_boost(payload: dict, active_file: str | None) -> float:
+    if not active_file:
+        return 0.0
+    active = active_file.replace("\\", "/").lower()
+    file_path = str(payload.get("file_path") or "").replace("\\", "/").lower()
+    relative_path = str(payload.get("relative_path") or "").replace("\\", "/").lower()
+    folder = str(payload.get("folder") or "").replace("\\", "/").lower()
+    if active.endswith(file_path) or active.endswith(relative_path):
+        return 0.25
+    active_folder = "/".join(active.split("/")[:-1])
+    if folder and (active_folder.endswith(folder) or folder in active_folder):
+        return 0.10
+    neighbors = [str(item).replace("\\", "/").lower() for item in payload.get("dependency_neighbors") or []]
+    active_name = active.split("/")[-1]
+    if any(active.endswith(neighbor) or neighbor.endswith(active_name) for neighbor in neighbors):
+        return 0.18
+    return 0.0
+
+
+def _has_project_map_source(sources: list[RagSource]) -> bool:
+    return any(source.metadata.get("source") == "project_map" or source.chunk_type == "project_map" for source in sources)
+
+
+def _reliable_project_source_count(sources: list[RagSource]) -> int:
+    return sum(1 for source in sources if _is_reliable_project_source(source))
+
+
+def _is_reliable_project_source(source: RagSource) -> bool:
+    if source.metadata.get("source") == "project_map" or source.chunk_type == "project_map":
+        return True
+    if source.score < settings.rag_threshold:
+        return False
+    if source.metadata.get("is_doc_file") or source.metadata.get("is_config_file") or source.metadata.get("is_entry_point"):
+        return True
+    if safe_float(source.metadata.get("importance_score", 0.0)) >= 0.3:
+        return True
+    relative = str(source.metadata.get("relative_file_path") or source.metadata.get("relative_path") or "").lower()
+    if relative.startswith("readme") or relative.endswith("/readme.md"):
+        return True
+    return False
+
+
 def project_map_score(payload: dict, query: str) -> float:
     terms = extract_query_terms(query)
     content = str(payload.get("content", "")).lower()
@@ -221,10 +397,14 @@ def project_map_score(payload: dict, query: str) -> float:
     haystack = " ".join(
         [
             content,
+            " ".join(project_map.get("project_types", []) if isinstance(project_map, dict) else []),
+            " ".join(project_map.get("detected_frameworks", []) if isinstance(project_map, dict) else []),
             " ".join(project_map.get("main_modules", []) if isinstance(project_map, dict) else []),
             " ".join(project_map.get("entry_points", []) if isinstance(project_map, dict) else []),
             " ".join(project_map.get("config_files", []) if isinstance(project_map, dict) else []),
+            " ".join(project_map.get("important_files", []) if isinstance(project_map, dict) else []),
+            " ".join(project_map.get("dependency_files", []) if isinstance(project_map, dict) else []),
         ]
     ).lower()
     matches = sum(1 for term in terms if term in haystack)
-    return min(0.80, 0.58 + matches * 0.04)
+    return min(0.82, 0.64 + matches * 0.04)

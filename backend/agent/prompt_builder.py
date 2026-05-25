@@ -46,9 +46,11 @@ class PromptBuilderAgent:
                     "Explain the retrieved code.",
                     "Do not generate code.",
                     "Do not invent classes/functions.",
-                    "Use only the retrieved project context when it is relevant.",
+                    "Use only the retrieved project context.",
+                    "Do not guess missing architecture.",
+                    "Do not mention technologies unless they appear in the retrieved files.",
+                    "If the retrieved context is insufficient, say that clearly.",
                     "Put the answer in explanation.",
-                    "If the context is insufficient, say what is missing.",
                     "Return prose explanation only.",
                 ]
             )
