@@ -3,7 +3,10 @@ import { GenerateResponse } from './apiClient';
 
 export type ChatViewMessage =
   | { type: 'send'; text: string }
-  | { type: 'apply'; responseId: string };
+  | { type: 'apply'; responseId: string }
+  | { type: 'checkRagStatus' }
+  | { type: 'indexProject'; mode: 'incremental' | 'full' }
+  | { type: 'resetProjectIndex' };
 
 export interface AssistantResponsePayload {
   responseId: string;
@@ -53,6 +56,31 @@ export function getChatViewHtml(webview: vscode.Webview): string {
       flex: 1;
       overflow-y: auto;
       padding: 12px;
+    }
+
+    .rag-status-panel {
+      border-bottom: 1px solid var(--border);
+      padding: 8px 12px;
+      background: var(--vscode-sideBar-background);
+    }
+
+    .rag-status-title {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .rag-status-body {
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .rag-status-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
     }
 
     .message {
@@ -208,6 +236,16 @@ export function getChatViewHtml(webview: vscode.Webview): string {
 </head>
 <body>
   <div class="shell">
+    <div id="ragStatusPanel" class="rag-status-panel">
+      <div class="rag-status-title">RAG index</div>
+      <div id="ragStatusBody" class="rag-status-body">Checking workspace index...</div>
+      <div class="rag-status-actions">
+        <button id="checkRagStatus" class="secondary">Check RAG Status</button>
+        <button id="indexProject" class="secondary">Index Project</button>
+        <button id="fullIndexProject" class="secondary">Full Re-index Project</button>
+        <button id="resetProjectIndex" class="secondary">Reset Project Index</button>
+      </div>
+    </div>
     <div id="messages" class="messages" aria-live="polite">
       <div class="empty-state">Ask about the current selection, active file, or indexed workspace.</div>
     </div>
@@ -226,6 +264,11 @@ export function getChatViewHtml(webview: vscode.Webview): string {
     const input = document.getElementById('input');
     const send = document.getElementById('send');
     const status = document.getElementById('status');
+    const ragStatusBody = document.getElementById('ragStatusBody');
+    const checkRagStatus = document.getElementById('checkRagStatus');
+    const indexProject = document.getElementById('indexProject');
+    const fullIndexProject = document.getElementById('fullIndexProject');
+    const resetProjectIndex = document.getElementById('resetProjectIndex');
 
     function clearEmptyState() {
       const empty = messages.querySelector('.empty-state');
@@ -390,6 +433,46 @@ export function getChatViewHtml(webview: vscode.Webview): string {
       return parts.join(' | ');
     }
 
+    function renderRagStatus(payload) {
+      if (!ragStatusBody) {
+        return;
+      }
+      if (payload.error) {
+        ragStatusBody.textContent = payload.error;
+        return;
+      }
+      const status = payload.status;
+      if (!status) {
+        ragStatusBody.textContent = payload.message || 'RAG status unavailable.';
+        return;
+      }
+      const projectName = status.project_path ? String(status.project_path).split(/[\\\\/]/).filter(Boolean).pop() : 'Workspace';
+      const state = status.indexed && status.project_map_exists ? 'Indexed' : 'RAG index not ready';
+      const qdrant = status.qdrant_ready === false ? ' | Qdrant offline or unavailable' : '';
+      const lines = [
+        projectName + ': ' + state + qdrant,
+        'Project ID: ' + status.project_id,
+        'Points: ' + status.point_count + ' | Project map: ' + (status.project_map_exists ? 'yes' : 'no'),
+        'Last indexed: ' + (status.last_indexed || 'unknown')
+      ];
+      if (Array.isArray(status.frameworks) && status.frameworks.length > 0) {
+        lines.push('Frameworks: ' + status.frameworks.join(', '));
+      }
+      if (Array.isArray(status.entry_points) && status.entry_points.length > 0) {
+        lines.push('Entry points: ' + status.entry_points.slice(0, 3).join(', '));
+      }
+      if (payload.message) {
+        lines.push(payload.message);
+      }
+      ragStatusBody.textContent = lines.join('\\n');
+    }
+
+    function renderRagIndexing(message) {
+      if (ragStatusBody) {
+        ragStatusBody.textContent = message;
+      }
+    }
+
     function setLoading(isLoading) {
       send.disabled = isLoading;
       status.textContent = isLoading ? 'Thinking locally...' : '';
@@ -407,6 +490,18 @@ export function getChatViewHtml(webview: vscode.Webview): string {
     }
 
     send.addEventListener('click', submit);
+    checkRagStatus.addEventListener('click', () => {
+      vscode.postMessage({ type: 'checkRagStatus' });
+    });
+    indexProject.addEventListener('click', () => {
+      vscode.postMessage({ type: 'indexProject', mode: 'incremental' });
+    });
+    fullIndexProject.addEventListener('click', () => {
+      vscode.postMessage({ type: 'indexProject', mode: 'full' });
+    });
+    resetProjectIndex.addEventListener('click', () => {
+      vscode.postMessage({ type: 'resetProjectIndex' });
+    });
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
@@ -422,6 +517,10 @@ export function getChatViewHtml(webview: vscode.Webview): string {
       } else if (message.type === 'sources') {
         setLoading(false);
         appendSourcesMessage(message.sources, message.message);
+      } else if (message.type === 'ragStatus') {
+        renderRagStatus(message.payload);
+      } else if (message.type === 'ragIndexing') {
+        renderRagIndexing(message.message);
       } else if (message.type === 'error') {
         setLoading(false);
         appendMessage('error', 'Error', message.message);

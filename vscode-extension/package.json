@@ -139,6 +139,11 @@
           "default": false,
           "description": "Show backend timing metadata in sidebar chat responses for debugging."
         },
+        "aiCodeAssistant.rag.autoIndexOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically request incremental local RAG indexing from the backend when a workspace opens and the index is missing or stale."
+        },
         "aiCodeAssistant.useRagForCodeTasks": {
           "type": "boolean",
           "default": false,

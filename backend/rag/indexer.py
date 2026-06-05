@@ -192,6 +192,15 @@ def index_project_report(project_path: str, max_files: int | None = None, full: 
     return indexer.index(project_path, max_files=max_files, full=full)
 
 
+def reset_project_index(project_path: str, store: QdrantStore | None = None) -> tuple[str, int]:
+    project_id = project_id_for_path(project_path)
+    active_store = store or QdrantStore()
+    deleted = active_store.delete_by_project_id(project_id)
+    _delete_project_state(project_id)
+    _delete_project_manifest(project_id)
+    return project_id, deleted
+
+
 def _embedding_text(payload: dict[str, Any]) -> str:
     parts = [
         str(payload.get("file_path", "")),
@@ -247,6 +256,13 @@ def _save_state(state: dict[str, Any], path: Path = INDEX_STATE_PATH) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _delete_project_state(project_id: str, path: Path = INDEX_STATE_PATH) -> None:
+    state = _load_state(path)
+    if project_id in state:
+        del state[project_id]
+        _save_state(state, path)
+
+
 def _load_index_manifest(path: Path = INDEX_MANIFEST_PATH) -> dict[str, Any]:
     if not path.exists():
         return {"projects": {}}
@@ -282,3 +298,11 @@ def _save_index_manifest(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _delete_project_manifest(project_id: str, path: Path = INDEX_MANIFEST_PATH) -> None:
+    manifest = _load_index_manifest(path)
+    if project_id in manifest.get("projects", {}):
+        del manifest["projects"][project_id]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
