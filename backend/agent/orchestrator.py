@@ -22,24 +22,32 @@ INSUFFICIENT_PROJECT_CONTEXT_MESSAGE = (
 MISSING_PROJECT_MAP_MESSAGE = "This project has indexed chunks, but the project map is missing. Please run full indexing."
 
 TECHNOLOGY_TERMS = {
+    "a2a",
+    "adk",
     "angular",
     "django",
     "docker",
     "fastapi",
     "flask",
     "github copilot",
+    "groq",
     "mongodb",
     "mysql",
     "ollama",
+    "openai",
     "postgres",
     "qdrant",
     "qdrantstore",
+    "rag",
     "ragcontrolleragent",
     "react",
     "redis",
     "spring",
     "sqlite",
+    "vector database",
+    "vector databases",
     "vue",
+    "ai code assistant",
 }
 
 
@@ -69,7 +77,10 @@ class AgentOrchestrator:
         context = self.context_agent.build(request, task)
         timing_context_ms = _elapsed_ms(step_start)
 
-        query = "\n".join(part for part in [context.instruction, context.code] if part)
+        query_parts = [context.instruction]
+        if not (context.task == "project_explain" and context.explanation_scope == "project"):
+            query_parts.append(context.code)
+        query = "\n".join(part for part in query_parts if part)
         step_start = perf_counter()
         rag_enabled = request.use_rag
         if context.task == "auto_complete" and "use_rag" not in request.model_fields_set:
@@ -81,6 +92,7 @@ class AgentOrchestrator:
             active_file=context.file_path,
             project_path=context.project_path,
             task=context.task,
+            explanation_scope=context.explanation_scope,
         )
         timing_rag_ms = _elapsed_ms(step_start)
         logger.info(
@@ -92,7 +104,11 @@ class AgentOrchestrator:
             len(rag.sources),
         )
 
-        if context.task == "project_explain" and _insufficient_project_context(rag):
+        if (
+            context.task == "project_explain"
+            and context.explanation_scope == "project"
+            and _insufficient_project_context(rag)
+        ):
             refusal_message = _project_context_refusal_message(rag)
             validation = ValidationResult(valid=True, syntax_valid=None, validator="project_context_guard")
             metadata = self._base_metadata(
@@ -121,7 +137,7 @@ class AgentOrchestrator:
                     "validation_duration_ms": validation.duration_ms,
                     "validation_errors": validation.errors,
                     "validation_warnings": validation.warnings,
-                    **self._rag_metadata(rag),
+                    **self._rag_metadata(rag, context, rag_requested=rag_enabled),
                     **metadata,
                 },
             )
@@ -138,7 +154,7 @@ class AgentOrchestrator:
 
         formatted = self.response_formatter.extract(raw_output, context)
         grounding_metadata: dict[str, object] = {}
-        if context.task == "project_explain":
+        if context.task == "project_explain" and context.explanation_scope == "project":
             grounded_output, blocked_terms = _enforce_project_explain_grounding(formatted.explanation, rag.sources)
             if blocked_terms:
                 raw_output = grounded_output
@@ -174,7 +190,7 @@ class AgentOrchestrator:
             prompt_length_chars=len(prompt),
             generated_length_chars=len(raw_output),
         )
-        timing_metadata.update(self._rag_metadata(rag))
+        timing_metadata.update(self._rag_metadata(rag, context, rag_requested=rag_enabled))
         timing_metadata.update(grounding_metadata)
         response = self.response_formatter.format(raw_output, context, rag, validation, stored, timing_metadata)
         response.metadata["timing_total_ms"] = _elapsed_ms(total_start)
@@ -218,7 +234,9 @@ class AgentOrchestrator:
             "generated_length_chars": generated_length_chars,
         }
 
-    def _rag_metadata(self, rag) -> dict[str, object]:
+    def _rag_metadata(self, rag, context, rag_requested: bool = True) -> dict[str, object]:
+        source_files = _source_files_used(rag.sources)
+        rag_context_available = bool(rag.use_rag and rag.sources)
         return {
             "project_id": rag.project_id,
             "project_path": rag.project_path,
@@ -229,6 +247,16 @@ class AgentOrchestrator:
             "rag_project_point_count": rag.project_point_count,
             "project_map_exists": rag.project_map_exists,
             "reliable_source_count": rag.reliable_source_count,
+            "explanation_scope": context.explanation_scope,
+            "selected_code_primary": context.selected_code_primary,
+            "active_file_path": context.active_file_path,
+            "has_selection": context.has_selection,
+            "rag_fallback_used": bool(rag_requested and not rag_context_available),
+            "rag_context_available": rag_context_available,
+            "project_map_used": _project_map_used(rag.sources),
+            "source_file_count": len(source_files),
+            "source_files_used": source_files,
+            "source_diversity_score": _source_diversity_score(rag.sources, source_files),
         }
 
 
@@ -270,3 +298,26 @@ def _enforce_project_explain_grounding(explanation: str, sources: list) -> tuple
     if blocked:
         return INSUFFICIENT_PROJECT_CONTEXT_MESSAGE, blocked
     return explanation, []
+
+
+def _project_map_used(sources: list) -> bool:
+    return any(source.metadata.get("source") == "project_map" or source.chunk_type == "project_map" for source in sources)
+
+
+def _source_files_used(sources: list) -> list[str]:
+    files: list[str] = []
+    for source in sources:
+        path = (
+            source.metadata.get("relative_file_path")
+            or source.metadata.get("relative_path")
+            or source.file_path
+        )
+        if path and path not in files:
+            files.append(str(path))
+    return files
+
+
+def _source_diversity_score(sources: list, source_files: list[str]) -> float:
+    if not sources:
+        return 0.0
+    return round(len(source_files) / len(sources), 3)

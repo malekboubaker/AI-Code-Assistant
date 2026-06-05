@@ -15,6 +15,7 @@ export interface CollectedEditorContext {
   documentUri?: string;
   hasSelection: boolean;
   selection?: SerializedRange;
+  surroundingContext?: string;
   contextSummary: string;
 }
 
@@ -54,11 +55,15 @@ export function collectEditorContext(options: ContextCollectorOptions = getChatC
   };
 
   if (!editor.selection.isEmpty) {
+    const surroundingContext = options.includeCursorContext
+      ? getSelectionSurroundingContext(document, editor.selection, Math.min(options.maxContextLines, 40)).text
+      : '';
     return {
       ...base,
       code: document.getText(editor.selection),
       hasSelection: true,
       selection: serializeRange(editor.selection),
+      surroundingContext,
       contextSummary: `Selected code from ${filePath ?? document.fileName}.`
     };
   }
@@ -109,6 +114,26 @@ function getCursorContext(
   let endLine = Math.min(document.lineCount - 1, startLine + maxContextLines - 1);
   startLine = Math.max(0, endLine - maxContextLines + 1);
 
+  const range = new vscode.Range(
+    new vscode.Position(startLine, 0),
+    document.lineAt(endLine).range.end
+  );
+  return {
+    text: document.getText(range),
+    startLine,
+    endLine
+  };
+}
+
+function getSelectionSurroundingContext(
+  document: vscode.TextDocument,
+  selection: vscode.Selection,
+  maxContextLines: number
+): { text: string; startLine: number; endLine: number } {
+  const selectedLineCount = selection.end.line - selection.start.line + 1;
+  const extraLines = Math.max(2, Math.floor((maxContextLines - selectedLineCount) / 2));
+  const startLine = Math.max(0, selection.start.line - extraLines);
+  const endLine = Math.min(document.lineCount - 1, selection.end.line + extraLines);
   const range = new vscode.Range(
     new vscode.Position(startLine, 0),
     document.lineAt(endLine).range.end

@@ -71,6 +71,56 @@ class FailingRetriever:
         raise AssertionError("RAG should be disabled for default auto_complete requests")
 
 
+class NoResultsRetriever:
+    def count_project_points(self, project_id):
+        return 3
+
+    def search(self, query, top_k=None, project_path=None, **kwargs):
+        return []
+
+
+class SupportingSelectionRetriever:
+    def count_project_points(self, project_id):
+        return 2
+
+    def search(self, query, top_k=None, project_path=None, **kwargs):
+        project_id = project_id_for_path(project_path)
+        return [
+            RagSource(
+                content="Invoice.calculate_total is used by the billing file to total visible invoice items.",
+                score=0.72,
+                language="python",
+                file_path="billing.py",
+                start_line=1,
+                end_line=4,
+                chunk_type="function",
+                symbol_name="calculate_total",
+                metadata={"project_id": project_id, "relative_file_path": "billing.py"},
+            )
+        ]
+
+
+class AutoCompleteRelevantRetriever:
+    def count_project_points(self, project_id):
+        return 1
+
+    def search(self, query, top_k=None, project_path=None, **kwargs):
+        project_id = project_id_for_path(project_path)
+        return [
+            RagSource(
+                content="def add(a, b):\n    return a + b",
+                score=0.71,
+                language="python",
+                file_path="math_utils.py",
+                start_line=1,
+                end_line=2,
+                chunk_type="function",
+                symbol_name="add",
+                metadata={"project_id": project_id, "relative_file_path": "math_utils.py"},
+            )
+        ]
+
+
 def test_orchestrator_runs_without_rag():
     orchestrator = AgentOrchestrator()
     orchestrator.model_provider = FakeModel()
@@ -113,6 +163,58 @@ def test_auto_complete_uses_short_generation_and_skips_default_rag():
     assert response.used_rag is False
     assert model.options.max_tokens == 64
     assert model.options.temperature == 0.1
+
+
+def test_auto_complete_uses_rag_when_explicitly_enabled():
+    orchestrator = AgentOrchestrator()
+    model = OptionCapturingModel()
+    orchestrator.model_provider = model
+    orchestrator.memory_writer = FakeMemory()
+    orchestrator.rag_controller = RagControllerAgent(retriever=AutoCompleteRelevantRetriever())
+
+    response = orchestrator.run(
+        GenerateRequest(
+            task="auto_complete",
+            instruction="complete this line",
+            language="python",
+            code="def add(a, b):\n    return",
+            file_path="math_utils.py",
+            project_path=".",
+            use_rag=True,
+        )
+    )
+
+    assert response.used_rag is True
+    assert response.metadata["rag_context_available"] is True
+    assert response.metadata["rag_fallback_used"] is False
+    assert model.options.max_tokens == 64
+
+
+def test_code_task_continues_when_rag_has_no_results():
+    orchestrator = AgentOrchestrator()
+    orchestrator.model_provider = TaskAwareCodeModel()
+    orchestrator.memory_writer = FakeMemory()
+    orchestrator.rag_controller = RagControllerAgent(retriever=NoResultsRetriever())
+
+    response = orchestrator.run(
+        GenerateRequest(
+            task="refactoring",
+            instruction="Refactor this function",
+            language="python",
+            code="def calc(x):\n    y=[]\n    [y.append(i*i) for i in x]\n    return y\n",
+            file_path="calc.py",
+            project_path=".",
+            has_selection=True,
+            use_rag=True,
+        )
+    )
+
+    assert response.generated_code.strip()
+    assert response.used_rag is False
+    assert response.metadata["rag_skip_reason"] == "no_results"
+    assert response.metadata["rag_fallback_used"] is True
+    assert response.metadata["rag_context_available"] is False
+    assert response.metadata["selected_code_primary"] is True
 
 
 def test_code_generation_tasks_still_return_valid_code():
@@ -358,6 +460,208 @@ class ExplanationModel:
             "to classify the request, then using ContextAgent and RAG, and finally passing "
             "the assembled context to PromptBuilderAgent to create the prompt."
         )
+
+
+class PlainExplanationModel:
+    name = "plain-explain"
+
+    def __init__(self):
+        self.prompt = ""
+
+    def generate(self, prompt, options=None):
+        self.prompt = prompt
+        return "The requested code is explained using the provided local context."
+
+
+class CapturingProjectRetriever:
+    def __init__(self):
+        self.query = ""
+        self.kwargs = {}
+
+    def count_project_points(self, project_id):
+        return 4
+
+    def search(self, query, top_k=None, project_path=None, **kwargs):
+        self.query = query
+        self.kwargs = kwargs
+        project_id = project_id_for_path(project_path)
+        return [
+            RagSource(
+                content=(
+                    "Project map summary:\n"
+                    "- Project type: Python\n"
+                    "- Entry points: agents/host_agent/__main__.py\n"
+                    "- Important files: agents/flight_agent/agent.py, agents/stay_agent/agent.py"
+                ),
+                score=0.78,
+                language="text",
+                file_path="project_map.json",
+                start_line=1,
+                end_line=4,
+                chunk_type="project_map",
+                symbol_name="project_map",
+                metadata={
+                    "source": "project_map",
+                    "project_id": project_id,
+                    "relative_file_path": "project_map.json",
+                },
+            ),
+            RagSource(
+                content="# Travel Planner\nPlans travel options from user requests.",
+                score=0.72,
+                language="markdown",
+                file_path="README.md",
+                start_line=1,
+                end_line=2,
+                chunk_type="doc",
+                metadata={
+                    "project_id": project_id,
+                    "relative_file_path": "README.md",
+                    "is_doc_file": True,
+                },
+            ),
+            RagSource(
+                content="def find_flights(request):\n    return []",
+                score=0.68,
+                language="python",
+                file_path="agents/flight_agent/agent.py",
+                start_line=1,
+                end_line=2,
+                chunk_type="function",
+                symbol_name="find_flights",
+                metadata={"project_id": project_id, "relative_file_path": "agents/flight_agent/agent.py"},
+            ),
+            RagSource(
+                content="def find_stays(request):\n    return []",
+                score=0.67,
+                language="python",
+                file_path="agents/stay_agent/agent.py",
+                start_line=1,
+                end_line=2,
+                chunk_type="function",
+                symbol_name="find_stays",
+                metadata={"project_id": project_id, "relative_file_path": "agents/stay_agent/agent.py"},
+            ),
+        ]
+
+
+def test_orchestrator_project_explain_routes_to_project_scope_without_active_code_dominance(tmp_path):
+    orchestrator = AgentOrchestrator()
+    model = PlainExplanationModel()
+    retriever = CapturingProjectRetriever()
+    orchestrator.model_provider = model
+    orchestrator.memory_writer = FakeMemory()
+    orchestrator.rag_controller = RagControllerAgent(retriever=retriever)
+
+    response = orchestrator.run(
+        GenerateRequest(
+            instruction="Explain this project",
+            language="python",
+            code="def active_flight_only():\n    return 'narrow file context'\n",
+            file_path=str(tmp_path / "agents" / "flight_agent" / "agent.py"),
+            project_path=str(tmp_path),
+            use_rag=True,
+        )
+    )
+
+    assert response.task == "project_explain"
+    assert response.metadata["explanation_scope"] == "project"
+    assert retriever.kwargs["explanation_scope"] == "project"
+    assert "active_flight_only" not in retriever.query
+    assert "active_flight_only" not in model.prompt
+    assert "A. Project goal" in model.prompt
+    assert response.metadata["project_map_used"] is True
+    assert response.metadata["source_file_count"] >= 3
+    assert "README.md" in response.metadata["source_files_used"]
+    assert response.metadata["selected_code_primary"] is False
+    assert response.metadata["rag_context_available"] is True
+    assert response.metadata["rag_fallback_used"] is False
+
+
+def test_orchestrator_file_level_explanation_still_works_without_rag():
+    orchestrator = AgentOrchestrator()
+    model = PlainExplanationModel()
+    orchestrator.model_provider = model
+    orchestrator.memory_writer = FakeMemory()
+
+    response = orchestrator.run(
+        GenerateRequest(
+            instruction="Explain this file",
+            language="typescript",
+            code="export function requestHandler(req: Request) {\n  return handle(req);\n}",
+            file_path="src/requestHandler.ts",
+            use_rag=False,
+        )
+    )
+
+    assert response.task == "project_explain"
+    assert response.metadata["explanation_scope"] == "file"
+    assert response.metadata["selected_code_primary"] is False
+    assert response.explanation.startswith("The requested code")
+    assert "requestHandler" in model.prompt
+    assert "You are explaining the current file, not the whole project." in model.prompt
+    assert "A. Project goal" not in model.prompt
+
+
+def test_orchestrator_selected_code_explanation_still_works_without_rag():
+    orchestrator = AgentOrchestrator()
+    model = PlainExplanationModel()
+    orchestrator.model_provider = model
+    orchestrator.memory_writer = FakeMemory()
+    orchestrator.rag_controller = RagControllerAgent(retriever=NoResultsRetriever())
+
+    response = orchestrator.run(
+        GenerateRequest(
+            instruction="Explain this code",
+            language="python",
+            code="def calculate_total(items):\n    return sum(items)\n",
+            file_path="billing.py",
+            project_path=".",
+            has_selection=True,
+            use_rag=True,
+        )
+    )
+
+    assert response.task == "project_explain"
+    assert response.metadata["explanation_scope"] == "selection"
+    assert response.metadata["selected_code_primary"] is True
+    assert response.metadata["rag_fallback_used"] is True
+    assert response.metadata["rag_context_available"] is False
+    assert response.explanation.startswith("The requested code")
+    assert "calculate_total" in model.prompt
+    assert "Selected code (primary source of truth):" in model.prompt
+    assert "A. Project goal" not in model.prompt
+
+
+def test_orchestrator_selected_code_explanation_uses_rag_as_supporting_context():
+    orchestrator = AgentOrchestrator()
+    model = PlainExplanationModel()
+    orchestrator.model_provider = model
+    orchestrator.memory_writer = FakeMemory()
+    orchestrator.rag_controller = RagControllerAgent(retriever=SupportingSelectionRetriever())
+
+    response = orchestrator.run(
+        GenerateRequest(
+            instruction="Explain this code",
+            language="python",
+            code="def calculate_total(items):\n    return sum(items)\n",
+            file_path="billing.py",
+            project_path=".",
+            has_selection=True,
+            surrounding_context="class Invoice:\n    def calculate_total(self, items):\n        return sum(items)\n",
+            use_rag=True,
+        )
+    )
+
+    assert response.used_rag is True
+    assert response.metadata["explanation_scope"] == "selection"
+    assert response.metadata["selected_code_primary"] is True
+    assert response.metadata["rag_fallback_used"] is False
+    assert response.metadata["rag_context_available"] is True
+    assert "Selected code (primary source of truth):" in model.prompt
+    assert "Nearby file context (supporting only):" in model.prompt
+    assert "Retrieved chunk" in model.prompt
+    assert "A. Project goal" not in model.prompt
 
 
 def test_orchestrator_project_explain_uses_rag_without_generated_code():

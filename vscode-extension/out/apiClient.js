@@ -39,14 +39,29 @@ const https = __importStar(require("node:https"));
 class ApiClient {
     endpoint;
     timeoutMs;
+    apiBaseUrl;
     constructor(endpoint, timeoutMs) {
         this.endpoint = endpoint;
         this.timeoutMs = timeoutMs;
         assertLocalhostEndpoint(endpoint);
+        this.apiBaseUrl = apiBaseFromGenerateEndpoint(endpoint);
     }
     async generate(request) {
         const response = await postJson(this.endpoint, request, this.timeoutMs);
         return validateGenerateResponse(response);
+    }
+    async getRagStatus(projectPath) {
+        const url = `${this.apiBaseUrl}/rag/status?project_path=${encodeURIComponent(projectPath)}`;
+        const response = await getJson(url, this.timeoutMs);
+        return validateRagStatusResponse(response);
+    }
+    async indexProject(projectPath, mode) {
+        const response = await postJson(`${this.apiBaseUrl}/rag/index`, { project_path: projectPath, mode }, this.timeoutMs);
+        return validateRagIndexResponse(response);
+    }
+    async resetProjectIndex(projectPath) {
+        const response = await postJson(`${this.apiBaseUrl}/rag/reset`, { project_path: projectPath }, this.timeoutMs);
+        return validateRagResetResponse(response);
     }
 }
 exports.ApiClient = ApiClient;
@@ -106,6 +121,46 @@ function postJson(endpoint, payload, timeoutMs) {
         req.end();
     });
 }
+function getJson(endpoint, timeoutMs) {
+    const url = new URL(endpoint);
+    const transport = url.protocol === 'https:' ? https : http;
+    return new Promise((resolve, reject) => {
+        const req = transport.request({
+            method: 'GET',
+            hostname: url.hostname,
+            port: url.port,
+            path: `${url.pathname}${url.search}`,
+            timeout: timeoutMs
+        }, (res) => {
+            const chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+                const body = Buffer.concat(chunks).toString('utf8');
+                if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+                    reject(new Error(`Backend returned HTTP ${res.statusCode}: ${body}`));
+                    return;
+                }
+                try {
+                    resolve(JSON.parse(body));
+                }
+                catch (error) {
+                    reject(new Error(`Invalid JSON response from backend: ${error.message}`));
+                }
+            });
+        });
+        req.on('timeout', () => {
+            req.destroy(new Error(`Backend request timed out after ${timeoutMs} ms.`));
+        });
+        req.on('error', (error) => {
+            if (error.code === 'ECONNREFUSED') {
+                reject(new Error('Backend not running. Start python scripts/start_backend.py'));
+                return;
+            }
+            reject(error);
+        });
+        req.end();
+    });
+}
 function validateGenerateResponse(value) {
     if (!value || typeof value !== 'object') {
         throw new Error('Invalid backend response: expected an object.');
@@ -124,5 +179,43 @@ function validateGenerateResponse(value) {
         throw new Error('Invalid backend response: rag_sources is missing or not an array.');
     }
     return response;
+}
+function validateRagStatusResponse(value) {
+    if (!value || typeof value !== 'object') {
+        throw new Error('Invalid RAG status response: expected an object.');
+    }
+    const response = value;
+    if (typeof response.project_id !== 'string' || typeof response.indexed !== 'boolean') {
+        throw new Error('Invalid RAG status response.');
+    }
+    return response;
+}
+function validateRagIndexResponse(value) {
+    if (!value || typeof value !== 'object') {
+        throw new Error('Invalid RAG index response: expected an object.');
+    }
+    const response = value;
+    if (response.status !== 'success' || typeof response.project_id !== 'string') {
+        throw new Error('Invalid RAG index response.');
+    }
+    return response;
+}
+function validateRagResetResponse(value) {
+    if (!value || typeof value !== 'object') {
+        throw new Error('Invalid RAG reset response: expected an object.');
+    }
+    const response = value;
+    if (response.status !== 'success' || typeof response.project_id !== 'string') {
+        throw new Error('Invalid RAG reset response.');
+    }
+    return response;
+}
+function apiBaseFromGenerateEndpoint(endpoint) {
+    const url = new URL(endpoint);
+    const pathname = url.pathname.replace(/\/$/, '');
+    if (pathname.endsWith('/generate')) {
+        url.pathname = pathname.slice(0, -'/generate'.length);
+    }
+    return url.toString().replace(/\/$/, '');
 }
 //# sourceMappingURL=apiClient.js.map

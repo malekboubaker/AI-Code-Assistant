@@ -139,6 +139,8 @@ function buildRequest(
     task,
     file_path: editor.document.uri.fsPath,
     project_path: workspaceFolder?.uri.fsPath,
+    has_selection: true,
+    surrounding_context: getManualSurroundingContext(editor),
     use_rag: useRag
   };
 }
@@ -214,6 +216,20 @@ function normalizeLanguage(languageId: string): string {
     rust: 'rust'
   };
   return map[languageId] ?? languageId;
+}
+
+function getManualSurroundingContext(editor: vscode.TextEditor): string {
+  const selection = editor.selection;
+  const document = editor.document;
+  const selectedLineCount = selection.end.line - selection.start.line + 1;
+  const extraLines = Math.max(2, Math.floor((40 - selectedLineCount) / 2));
+  const startLine = Math.max(0, selection.start.line - extraLines);
+  const endLine = Math.min(document.lineCount - 1, selection.end.line + extraLines);
+  const range = new vscode.Range(
+    new vscode.Position(startLine, 0),
+    document.lineAt(endLine).range.end
+  );
+  return document.getText(range);
 }
 
 function commandTitle(spec: CommandSpec): string {

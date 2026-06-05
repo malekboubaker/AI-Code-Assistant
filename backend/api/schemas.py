@@ -30,6 +30,14 @@ class GenerateRequest(BaseModel):
     )
     file_path: str | None = None
     project_path: str | None = None
+    has_selection: bool | None = Field(
+        None,
+        description="True when code is an explicit editor selection rather than cursor/file context.",
+    )
+    surrounding_context: str = Field(
+        "",
+        description="Optional nearby file context around the selected code.",
+    )
     use_rag: bool = True
     accepted: bool = False
     run_tests: bool = False
@@ -79,6 +87,47 @@ class IndexResponse(BaseModel):
     files_indexed: int
     chunks_indexed: int
     collection_name: str
+
+
+class RagStatusResponse(BaseModel):
+    project_id: str
+    project_path: str
+    indexed: bool
+    project_map_exists: bool
+    point_count: int
+    last_indexed: str | None = None
+    detected_languages: dict[str, int] = Field(default_factory=dict)
+    frameworks: list[str] = Field(default_factory=list)
+    entry_points: list[str] = Field(default_factory=list)
+    qdrant_collection: str
+    qdrant_ready: bool = False
+
+
+class RagIndexRequest(BaseModel):
+    project_path: str
+    mode: Literal["incremental", "full"] = "incremental"
+
+
+class RagIndexResponse(BaseModel):
+    status: str
+    project_id: str
+    files_scanned: int
+    files_indexed: int
+    files_skipped: int
+    chunks_created: int
+    chunks_stored: int
+    project_map_exists: bool
+    duration_ms: int
+
+
+class RagResetRequest(BaseModel):
+    project_path: str
+
+
+class RagResetResponse(BaseModel):
+    status: str
+    project_id: str
+    deleted_points: int
 
 
 class HealthResponse(BaseModel):

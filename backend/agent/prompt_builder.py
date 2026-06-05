@@ -41,19 +41,7 @@ class PromptBuilderAgent:
             f"Use idiomatic {language_label} and preserve the surrounding language/runtime conventions.",
         ]
         if context.task == "project_explain":
-            parts.extend(
-                [
-                    "Explain the retrieved code.",
-                    "Do not generate code.",
-                    "Do not invent classes/functions.",
-                    "Use only the retrieved project context.",
-                    "Do not guess missing architecture.",
-                    "Do not mention technologies unless they appear in the retrieved files.",
-                    "If the retrieved context is insufficient, say that clearly.",
-                    "Put the answer in explanation.",
-                    "Return prose explanation only.",
-                ]
-            )
+            parts.extend(_project_explain_instructions(context.explanation_scope))
         elif context.task == "auto_complete":
             parts.extend(
                 [
@@ -96,23 +84,46 @@ class PromptBuilderAgent:
             parts.extend(["", "Refactoring requirements:", "- Return only the refactored code.", "- Preserve behavior."])
         elif context.task == "perf_opt":
             parts.extend(["", "Performance optimization requirements:", "- Return only the optimized code.", "- Preserve behavior."])
+        if context.selected_code_primary and context.task != "project_explain":
+            parts.extend(
+                [
+                    "",
+                    "Selected-code requirements:",
+                    "- Treat the selected code as the primary source of truth.",
+                    "- Use retrieved project context only as supporting context.",
+                    "- Do not replace the user's selected-code request with a whole-project answer.",
+                ]
+            )
         if rag.use_rag:
             parts.extend(
                 [
                     "",
-                    "Relevant local project context from Qdrant follows.",
+                    "Relevant local project context follows.",
                     "Use it only if it is truly relevant; ignore it if it conflicts with the user request.",
                     rag.context,
                 ]
             )
+        code_label, current_code = _code_section(context)
         parts.extend(
             [
                 "",
                 "User instruction:",
                 context.instruction,
                 "",
-                "Current code:",
-                f"```{context.language}\n{context.code}\n```" if context.code else "(none)",
+                code_label,
+                current_code,
+            ]
+        )
+        if context.selected_code_primary and context.surrounding_context.strip():
+            parts.extend(
+                [
+                    "",
+                    "Nearby file context (supporting only):",
+                    f"```{context.language}\n{context.surrounding_context}\n```",
+                ]
+            )
+        parts.extend(
+            [
                 "",
                 (
                     "Return the final answer as prose explanation only. Avoid external APIs or cloud services."
@@ -128,3 +139,74 @@ class PromptBuilderAgent:
         prompt = "\n".join(parts)
         logger.debug("Final prompt sent to model for task=%s:\n%s", context.task, prompt)
         return prompt
+
+
+def _project_explain_instructions(scope: str) -> list[str]:
+    common = [
+        f"Explanation scope: {scope}",
+        "Do not generate code.",
+        "Do not invent classes/functions.",
+        "Put the answer in explanation.",
+        "Return prose explanation only.",
+    ]
+    if scope == "project":
+        return common + [
+            "Use only the retrieved project context.",
+            "Do not guess missing architecture.",
+            "Do not mention technologies unless they appear in the retrieved files.",
+            "If the retrieved context is insufficient, say that clearly.",
+            "Write a project-level explanation, not a single-file walkthrough.",
+            "Prioritize project map, README/docs, manifests/config files, entry points, important files, and representative modules.",
+            "Do not let the active editor file dominate the explanation unless the retrieved sources show it is the main project entry point.",
+            "Use this structure exactly:",
+            "A. Project goal",
+            "B. Main components",
+            "C. How it works",
+            "D. Main technologies",
+            "E. Expected input/output",
+            "F. Source-based notes",
+            "Grounding rules:",
+            "- Use only retrieved project context.",
+            "- Do not invent architecture.",
+            "- Do not mention a technology unless it appears in retrieved sources.",
+            "- If only one file was retrieved, say: \"Based on the available indexed context...\"",
+            "- If the project overview is incomplete, say what context is missing.",
+            "- Do not mention Qdrant, RAG, vector databases, or the AI Code Assistant infrastructure unless those technologies exist in the target project sources.",
+        ]
+    if scope == "file":
+        return common + [
+            "You are explaining the current file, not the whole project.",
+            "The current file/context is the primary source of truth.",
+            "Use retrieved project context only as supporting context.",
+            "Explain the current file using retrieved context only when it clarifies imports, dependencies, or surrounding project behavior.",
+            "Focus on the file purpose, key symbols, and how it relates to the project.",
+            "Do not turn this into a whole-project explanation unless the user asks for the project.",
+            "If no retrieved context is included, base the answer on the current file/context.",
+        ]
+    return common + [
+        "You are explaining selected code from a specific file.",
+        "The selected code is the primary source of truth.",
+        "Explain exactly what this selected code does and why it exists in this file.",
+        "Use retrieved project context only as supporting context.",
+        "Do not turn this into a whole-project explanation unless the user asks for the project.",
+        "Explain the retrieved code.",
+        "Focus on the selected code or requested symbol.",
+        "Use retrieved context only when it clarifies dependencies or callers.",
+        "Explain what the selected code does.",
+        "Explain visible inputs and outputs.",
+        "Explain important functions, classes, variables, and control flow.",
+        "Explain the selected code's role in the current file.",
+        "Mention project-level architecture only if retrieved context clearly supports it.",
+        "If no retrieved context is included, say: \"Based on the selected code...\"",
+    ]
+
+
+def _code_section(context: RequestContext) -> tuple[str, str]:
+    if context.task == "project_explain" and context.explanation_scope == "project":
+        return (
+            "Current code:",
+            "(not included for project-level explanation; rely on retrieved project sources above)",
+        )
+    label = "Selected code (primary source of truth):" if context.selected_code_primary else "Current code/context:"
+    code = f"```{context.language}\n{context.code}\n```" if context.code else "(none)"
+    return label, code

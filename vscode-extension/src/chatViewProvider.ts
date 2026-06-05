@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { ApiClient, GenerateRequest, GenerateResponse } from './apiClient';
+import { ApiClient, GenerateRequest, GenerateResponse, RagIndexMode } from './apiClient';
 import { AssistantResponsePayload, ChatViewMessage, getChatViewHtml } from './chatPanel';
 import { CollectedEditorContext, collectEditorContext, deserializeRange } from './contextCollector';
 
@@ -50,6 +50,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage((message: ChatViewMessage) => {
       void this.handleMessage(message);
     });
+    void this.checkRagStatus({ autoIndexIfNeeded: true });
   }
 
   private async handleMessage(message: ChatViewMessage): Promise<void> {
@@ -60,6 +61,18 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'apply') {
         await this.applyGeneratedCode(message.responseId);
+        return;
+      }
+      if (message.type === 'checkRagStatus') {
+        await this.checkRagStatus();
+        return;
+      }
+      if (message.type === 'indexProject') {
+        await this.indexProject(message.mode);
+        return;
+      }
+      if (message.type === 'resetProjectIndex') {
+        await this.resetProjectIndex();
       }
     } catch (error) {
       this.postError(error);
@@ -94,6 +107,8 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
       task: null,
       file_path: editorContext.filePath,
       project_path: editorContext.projectPath,
+      has_selection: editorContext.hasSelection,
+      surrounding_context: editorContext.surroundingContext,
       use_rag: useRag
     };
 
@@ -126,6 +141,113 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
         ? 'Sources used for the previous response.'
         : 'No RAG sources are available for the previous response.'
     });
+  }
+
+  private async checkRagStatus(options: { autoIndexIfNeeded?: boolean } = {}): Promise<void> {
+    const projectPath = getWorkspaceProjectPath();
+    if (!projectPath) {
+      this.postMessage({
+        type: 'ragStatus',
+        payload: { message: 'Open a workspace folder to use project RAG indexing.' }
+      });
+      return;
+    }
+
+    let client: ApiClient;
+    try {
+      client = this.createApiClient();
+    } catch (error) {
+      this.postMessage({ type: 'ragStatus', payload: { error: formatBackendError(error) } });
+      return;
+    }
+
+    try {
+      const status = await client.getRagStatus(projectPath);
+      const ready = status.indexed && status.project_map_exists;
+      this.postMessage({
+        type: 'ragStatus',
+        payload: {
+          status,
+          message: ready ? 'RAG index ready.' : 'RAG index not ready. Use Index Project to build it.'
+        }
+      });
+
+      const autoIndex = vscode.workspace
+        .getConfiguration('aiCodeAssistant')
+        .get<boolean>('rag.autoIndexOnOpen', true);
+      if (options.autoIndexIfNeeded && autoIndex && !ready) {
+        void this.indexProject('incremental');
+      }
+    } catch (error) {
+      this.postMessage({ type: 'ragStatus', payload: { error: formatBackendError(error) } });
+    }
+  }
+
+  private async indexProject(mode: RagIndexMode): Promise<void> {
+    const projectPath = getWorkspaceProjectPath();
+    if (!projectPath) {
+      this.postError('Open a workspace folder before indexing a project.');
+      return;
+    }
+    let client: ApiClient;
+    try {
+      client = this.createApiClient();
+    } catch (error) {
+      this.postError(error);
+      return;
+    }
+
+    this.postMessage({
+      type: 'ragIndexing',
+      message: mode === 'full' ? 'Full project re-indexing started...' : 'Incremental project indexing started...'
+    });
+    try {
+      const response = await client.indexProject(projectPath, mode);
+      this.postMessage({
+        type: 'ragIndexing',
+        message:
+          `Indexing complete: ${response.files_indexed}/${response.files_scanned} files indexed, ` +
+          `${response.chunks_stored} chunks stored in ${response.duration_ms} ms.`
+      });
+      await this.checkRagStatus();
+    } catch (error) {
+      this.postMessage({ type: 'ragStatus', payload: { error: formatBackendError(error) } });
+    }
+  }
+
+  private async resetProjectIndex(): Promise<void> {
+    const projectPath = getWorkspaceProjectPath();
+    if (!projectPath) {
+      this.postError('Open a workspace folder before resetting a project index.');
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      'Reset the RAG index for this workspace only?',
+      { modal: true },
+      'Reset Project Index'
+    );
+    if (choice !== 'Reset Project Index') {
+      return;
+    }
+
+    let client: ApiClient;
+    try {
+      client = this.createApiClient();
+    } catch (error) {
+      this.postError(error);
+      return;
+    }
+
+    try {
+      const response = await client.resetProjectIndex(projectPath);
+      this.postMessage({
+        type: 'ragIndexing',
+        message: `Reset complete for project ${response.project_id}. Deleted points: ${response.deleted_points}.`
+      });
+      await this.checkRagStatus();
+    } catch (error) {
+      this.postMessage({ type: 'ragStatus', payload: { error: formatBackendError(error) } });
+    }
   }
 
   private async applyGeneratedCode(responseId: string): Promise<void> {
@@ -220,6 +342,13 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
   private postMessage(message: unknown): void {
     void this.webviewView?.webview.postMessage(message);
   }
+
+  private createApiClient(): ApiClient {
+    const config = vscode.workspace.getConfiguration('aiCodeAssistant');
+    const endpoint = config.get<string>('backendUrl', 'http://localhost:8000/api/v1/generate');
+    const timeoutMs = config.get<number>('timeoutMs', 120000);
+    return new ApiClient(endpoint, timeoutMs);
+  }
 }
 
 class GeneratedCodePreviewProvider implements vscode.TextDocumentContentProvider {
@@ -249,6 +378,17 @@ function formatBackendError(error: unknown): string {
     return 'Backend not running. Start python scripts/start_backend.py';
   }
   return message;
+}
+
+function getWorkspaceProjectPath(): string | undefined {
+  const activeUri = vscode.window.activeTextEditor?.document.uri;
+  if (activeUri) {
+    const activeFolder = vscode.workspace.getWorkspaceFolder(activeUri);
+    if (activeFolder) {
+      return activeFolder.uri.fsPath;
+    }
+  }
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
 function isSourceListingRequest(text: string): boolean {
