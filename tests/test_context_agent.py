@@ -69,3 +69,24 @@ def test_context_agent_treats_explicit_file_explanation_as_file_even_with_code()
     assert context.explanation_scope == "file"
     assert context.has_selection is False
     assert context.selected_code_primary is False
+
+
+def test_context_agent_preserves_chat_history():
+    context = ContextAgent().build(
+        GenerateRequest(
+            instruction="Now refactor the second function",
+            code="def first(): pass\n\ndef second(): pass\n",
+            language="python",
+            file_path="helpers.py",
+            project_path=".",
+            chat_history=[
+                {"role": "user", "content": "Explain this file."},
+                {"role": "assistant", "content": "The second function is second()."},
+            ],
+        ),
+        "refactoring",
+    )
+
+    assert context.chat_history
+    assert context.chat_history[-1].role == "assistant"
+    assert "second()" in context.chat_history[-1].content

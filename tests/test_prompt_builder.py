@@ -98,6 +98,29 @@ def test_prompt_builder_project_scope_uses_project_explanation_structure():
     assert "(not included for project-level explanation" in prompt
 
 
+def test_prompt_builder_includes_sidebar_chat_memory_for_followups():
+    context = RequestContext(
+        task="refactoring",
+        language="python",
+        instruction="Now refactor the second function",
+        code="def first():\n    return 1\n\n\ndef second():\n    return 2\n",
+        file_path="helpers.py",
+        project_path=".",
+        imports=[],
+        chat_history=[
+            type("Message", (), {"role": "user", "content": "Explain this file."})(),
+            type("Message", (), {"role": "assistant", "content": "The second function is second()."})(),
+        ],
+    )
+
+    prompt = PromptBuilderAgent().build(context, RagDecision(use_rag=False))
+
+    assert "Current sidebar chat session memory:" in prompt
+    assert 'Use this to resolve follow-up references such as "the second function"' in prompt
+    assert "assistant: The second function is second()." in prompt
+    assert "Now refactor the second function" in prompt
+
+
 def test_prompt_builder_auto_complete_returns_only_missing_code():
     context = RequestContext(
         task="auto_complete",

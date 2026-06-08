@@ -20,6 +20,11 @@ TaskName = Literal[
 LanguageName = Literal["python", "javascript", "typescript", "java", "cpp", "csharp", "rust"]
 
 
+class ChatHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class GenerateRequest(BaseModel):
     instruction: str = Field(..., description="User instruction or question.")
     code: str = Field("", description="Selected/current code.")
@@ -37,6 +42,10 @@ class GenerateRequest(BaseModel):
     surrounding_context: str = Field(
         "",
         description="Optional nearby file context around the selected code.",
+    )
+    chat_history: list[ChatHistoryMessage] = Field(
+        default_factory=list,
+        description="Recent sidebar chat messages from the current session.",
     )
     use_rag: bool = True
     accepted: bool = False

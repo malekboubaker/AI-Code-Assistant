@@ -1,11 +1,13 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { ApiClient, GenerateRequest, GenerateResponse, RagIndexMode } from './apiClient';
+import { ApiClient, ChatHistoryMessage, GenerateRequest, GenerateResponse, RagIndexMode } from './apiClient';
 import { AssistantResponsePayload, ChatViewMessage, getChatViewHtml } from './chatPanel';
 import { CollectedEditorContext, collectEditorContext, deserializeRange } from './contextCollector';
 
 const CHAT_VIEW_ID = 'aiCodeAssistant.chatView';
 const PREVIEW_SCHEME = 'ai-code-assistant-preview';
+const MAX_CHAT_HISTORY_MESSAGES = 10;
+const MAX_CHAT_HISTORY_ENTRY_CHARS = 1400;
 
 interface PendingApply {
   context: CollectedEditorContext;
@@ -31,6 +33,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
   private webviewView?: vscode.WebviewView;
   private responseCounter = 0;
   private lastBackendResponse?: GenerateResponse;
+  private chatHistory: ChatHistoryMessage[] = [];
   private readonly pendingApply = new Map<string, PendingApply>();
   private readonly previewProvider = new GeneratedCodePreviewProvider();
 
@@ -109,6 +112,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
       project_path: editorContext.projectPath,
       has_selection: editorContext.hasSelection,
       surrounding_context: editorContext.surroundingContext,
+      chat_history: this.chatHistory.slice(),
       use_rag: useRag
     };
 
@@ -119,6 +123,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
       if (response.generated_code.trim()) {
         this.pendingApply.set(responseId, { context: editorContext, response });
       }
+      this.rememberTurn(instruction, editorContext, response);
       const payload: AssistantResponsePayload = {
         responseId,
         instruction,
@@ -349,6 +354,24 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     const timeoutMs = config.get<number>('timeoutMs', 120000);
     return new ApiClient(endpoint, timeoutMs);
   }
+
+  private rememberTurn(
+    instruction: string,
+    editorContext: CollectedEditorContext,
+    response: GenerateResponse
+  ): void {
+    this.chatHistory.push({
+      role: 'user',
+      content: trimMemoryEntry(`${instruction}\nContext: ${editorContext.contextSummary}`)
+    });
+    this.chatHistory.push({
+      role: 'assistant',
+      content: trimMemoryEntry(formatAssistantMemory(response))
+    });
+    if (this.chatHistory.length > MAX_CHAT_HISTORY_MESSAGES) {
+      this.chatHistory = this.chatHistory.slice(-MAX_CHAT_HISTORY_MESSAGES);
+    }
+  }
 }
 
 class GeneratedCodePreviewProvider implements vscode.TextDocumentContentProvider {
@@ -406,4 +429,33 @@ function isSourceListingRequest(text: string): boolean {
     /\bsources used\b/
   ];
   return patterns.some((pattern) => pattern.test(normalized));
+}
+
+function formatAssistantMemory(response: GenerateResponse): string {
+  const parts: string[] = [`Task: ${response.task}`];
+  if (response.explanation.trim()) {
+    parts.push(`Explanation:\n${response.explanation.trim()}`);
+  }
+  if (response.generated_code.trim()) {
+    parts.push(`Generated code:\n${response.generated_code.trim()}`);
+  }
+  if (Array.isArray(response.rag_sources) && response.rag_sources.length > 0) {
+    const sources = response.rag_sources.slice(0, 8).map((source) => {
+      const metadata = source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
+      const relativePath = String(metadata.relative_file_path || metadata.relative_path || source.file_path || 'unknown');
+      const symbol = source.symbol_name ? ` symbol=${source.symbol_name}` : '';
+      const lines =
+        source.start_line || source.end_line ? ` lines=${source.start_line ?? '?'}-${source.end_line ?? '?'}` : '';
+      return `- ${relativePath}${symbol}${lines}`;
+    });
+    parts.push(`Sources:\n${sources.join('\n')}`);
+  }
+  return parts.join('\n\n');
+}
+
+function trimMemoryEntry(value: string): string {
+  if (value.length <= MAX_CHAT_HISTORY_ENTRY_CHARS) {
+    return value;
+  }
+  return `${value.slice(0, MAX_CHAT_HISTORY_ENTRY_CHARS).trimEnd()}\n...[trimmed]`;
 }

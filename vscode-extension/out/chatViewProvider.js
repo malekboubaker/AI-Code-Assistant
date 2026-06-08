@@ -41,6 +41,8 @@ const chatPanel_1 = require("./chatPanel");
 const contextCollector_1 = require("./contextCollector");
 const CHAT_VIEW_ID = 'aiCodeAssistant.chatView';
 const PREVIEW_SCHEME = 'ai-code-assistant-preview';
+const MAX_CHAT_HISTORY_MESSAGES = 10;
+const MAX_CHAT_HISTORY_ENTRY_CHARS = 1400;
 function registerChatView(context) {
     const provider = new ChatViewProvider(context);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(CHAT_VIEW_ID, provider, {
@@ -57,6 +59,7 @@ class ChatViewProvider {
     webviewView;
     responseCounter = 0;
     lastBackendResponse;
+    chatHistory = [];
     pendingApply = new Map();
     previewProvider = new GeneratedCodePreviewProvider();
     constructor(extensionContext) {
@@ -129,6 +132,7 @@ class ChatViewProvider {
             project_path: editorContext.projectPath,
             has_selection: editorContext.hasSelection,
             surrounding_context: editorContext.surroundingContext,
+            chat_history: this.chatHistory.slice(),
             use_rag: useRag
         };
         try {
@@ -138,6 +142,7 @@ class ChatViewProvider {
             if (response.generated_code.trim()) {
                 this.pendingApply.set(responseId, { context: editorContext, response });
             }
+            this.rememberTurn(instruction, editorContext, response);
             const payload = {
                 responseId,
                 instruction,
@@ -335,6 +340,19 @@ class ChatViewProvider {
         const timeoutMs = config.get('timeoutMs', 120000);
         return new apiClient_1.ApiClient(endpoint, timeoutMs);
     }
+    rememberTurn(instruction, editorContext, response) {
+        this.chatHistory.push({
+            role: 'user',
+            content: trimMemoryEntry(`${instruction}\nContext: ${editorContext.contextSummary}`)
+        });
+        this.chatHistory.push({
+            role: 'assistant',
+            content: trimMemoryEntry(formatAssistantMemory(response))
+        });
+        if (this.chatHistory.length > MAX_CHAT_HISTORY_MESSAGES) {
+            this.chatHistory = this.chatHistory.slice(-MAX_CHAT_HISTORY_MESSAGES);
+        }
+    }
 }
 class GeneratedCodePreviewProvider {
     contentByUri = new Map();
@@ -386,5 +404,31 @@ function isSourceListingRequest(text) {
         /\bsources used\b/
     ];
     return patterns.some((pattern) => pattern.test(normalized));
+}
+function formatAssistantMemory(response) {
+    const parts = [`Task: ${response.task}`];
+    if (response.explanation.trim()) {
+        parts.push(`Explanation:\n${response.explanation.trim()}`);
+    }
+    if (response.generated_code.trim()) {
+        parts.push(`Generated code:\n${response.generated_code.trim()}`);
+    }
+    if (Array.isArray(response.rag_sources) && response.rag_sources.length > 0) {
+        const sources = response.rag_sources.slice(0, 8).map((source) => {
+            const metadata = source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
+            const relativePath = String(metadata.relative_file_path || metadata.relative_path || source.file_path || 'unknown');
+            const symbol = source.symbol_name ? ` symbol=${source.symbol_name}` : '';
+            const lines = source.start_line || source.end_line ? ` lines=${source.start_line ?? '?'}-${source.end_line ?? '?'}` : '';
+            return `- ${relativePath}${symbol}${lines}`;
+        });
+        parts.push(`Sources:\n${sources.join('\n')}`);
+    }
+    return parts.join('\n\n');
+}
+function trimMemoryEntry(value) {
+    if (value.length <= MAX_CHAT_HISTORY_ENTRY_CHARS) {
+        return value;
+    }
+    return `${value.slice(0, MAX_CHAT_HISTORY_ENTRY_CHARS).trimEnd()}\n...[trimmed]`;
 }
 //# sourceMappingURL=chatViewProvider.js.map

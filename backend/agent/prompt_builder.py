@@ -63,6 +63,16 @@ class PromptBuilderAgent:
                     "If explanation is needed, put it after a line that says exactly: Explanation:",
                 ]
             )
+        if context.chat_history:
+            parts.extend(
+                [
+                    "",
+                    "Current sidebar chat session memory:",
+                    "Use this to resolve follow-up references such as \"the second function\" or \"that file\".",
+                    "The latest user instruction and selected/current code remain the primary source of truth.",
+                    _format_chat_history(context.chat_history),
+                ]
+            )
 
         if context.task == "test_gen":
             parts.extend(
@@ -210,3 +220,26 @@ def _code_section(context: RequestContext) -> tuple[str, str]:
     label = "Selected code (primary source of truth):" if context.selected_code_primary else "Current code/context:"
     code = f"```{context.language}\n{context.code}\n```" if context.code else "(none)"
     return label, code
+
+
+def _format_chat_history(messages: list, max_messages: int = 8, max_chars: int = 6000) -> str:
+    selected = messages[-max_messages:]
+    lines: list[str] = []
+    remaining = max_chars
+    for message in selected:
+        role = str(getattr(message, "role", "message")).strip() or "message"
+        content = str(getattr(message, "content", "")).strip()
+        if not content:
+            continue
+        entry = f"{role}: {_trim_text(content, min(1200, remaining))}"
+        lines.append(entry)
+        remaining -= len(entry)
+        if remaining <= 0:
+            break
+    return "\n\n".join(lines) if lines else "(none)"
+
+
+def _trim_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...[trimmed]"

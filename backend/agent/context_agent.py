@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from backend.api.schemas import GenerateRequest, TaskName
+from backend.api.schemas import ChatHistoryMessage, GenerateRequest, TaskName
 from backend.tools.language_detector import detect_language
 
 ExplanationScope = str
@@ -44,6 +44,7 @@ class RequestContext:
     selected_code_primary: bool = False
     active_file_path: str | None = None
     surrounding_context: str = ""
+    chat_history: list[ChatHistoryMessage] | None = None
 
 
 class ContextAgent:
@@ -65,6 +66,7 @@ class ContextAgent:
             selected_code_primary=selected_code_primary,
             active_file_path=request.file_path,
             surrounding_context=request.surrounding_context,
+            chat_history=list(request.chat_history),
         )
 
 

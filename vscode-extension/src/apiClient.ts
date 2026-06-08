@@ -21,7 +21,13 @@ export interface GenerateRequest {
   project_path?: string;
   has_selection?: boolean;
   surrounding_context?: string;
+  chat_history?: ChatHistoryMessage[];
   use_rag: boolean;
+}
+
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
 }
 
 export interface ValidationResult {

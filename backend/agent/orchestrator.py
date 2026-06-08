@@ -251,6 +251,8 @@ class AgentOrchestrator:
             "selected_code_primary": context.selected_code_primary,
             "active_file_path": context.active_file_path,
             "has_selection": context.has_selection,
+            "chat_memory_used": bool(context.chat_history),
+            "chat_history_message_count": len(context.chat_history or []),
             "rag_fallback_used": bool(rag_requested and not rag_context_available),
             "rag_context_available": rag_context_available,
             "project_map_used": _project_map_used(rag.sources),

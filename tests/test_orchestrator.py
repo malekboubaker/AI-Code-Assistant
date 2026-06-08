@@ -447,6 +447,34 @@ def test_orchestrator_injects_rag_context_above_threshold():
     assert "AgentOrchestrator" in model.prompt
 
 
+def test_orchestrator_includes_chat_history_for_followup_requests():
+    orchestrator = AgentOrchestrator()
+    model = PromptCapturingModel()
+    orchestrator.model_provider = model
+    orchestrator.memory_writer = FakeMemory()
+
+    response = orchestrator.run(
+        GenerateRequest(
+            task="refactoring",
+            instruction="Now refactor the second function",
+            language="python",
+            code="def first():\n    return 1\n\n\ndef second():\n    return 2\n",
+            file_path="helpers.py",
+            use_rag=False,
+            chat_history=[
+                {"role": "user", "content": "Explain this file."},
+                {"role": "assistant", "content": "The second function is second()."},
+            ],
+        )
+    )
+
+    assert response.metadata["chat_memory_used"] is True
+    assert response.metadata["chat_history_message_count"] == 2
+    assert "Current sidebar chat session memory:" in model.prompt
+    assert "assistant: The second function is second()." in model.prompt
+    assert "Now refactor the second function" in model.prompt
+
+
 class ExplanationModel:
     name = "explain"
 
