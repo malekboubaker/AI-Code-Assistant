@@ -5,6 +5,9 @@ from dataclasses import dataclass
 
 from backend.api.schemas import ChatHistoryMessage, GenerateRequest, TaskName
 from backend.tools.language_detector import detect_language
+from backend.agent.task_router import TaskRouterAgent
+from backend.agent.conversation_memory import memory_store, ConversationTurn
+from backend.rag.file_matching import extract_file_references, extract_requested_entities
 
 ExplanationScope = str
 
@@ -49,17 +52,52 @@ class RequestContext:
 
 class ContextAgent:
     def build(self, request: GenerateRequest, task: TaskName) -> RequestContext:
+        project_path = request.project_path or ""
+        
+        # 1. Resolve semantic conversational references ("the previous file", "both", etc.)
+        resolved_refs = memory_store.resolve_references(project_path, request.instruction)
+        
+        # 2. Extract explicitly named files in this new instruction
+        explicit_entities = extract_requested_entities(request.instruction)
+        explicit_files = [e.name for e in explicit_entities if e.kind == "file"]
+        
+        # 3. Combine them into a new effective instruction string to pass down the pipeline
+        effective_instruction = request.instruction
+        if resolved_refs and not explicit_files:
+            # If the user used conversational references but didn't explicitly name a file,
+            # we inject the resolved files into the instruction so the task router & RAG see them
+            appended = " ".join(resolved_refs)
+            effective_instruction = f"{request.instruction} {appended}"
+            
         language = request.language or detect_language(request.file_path, request.code)
-        has_selection = infer_has_selection(request, task)
-        explanation_scope = infer_explanation_scope(request, task, has_selection=has_selection)
+        
+        # Update request instruction so TaskRouter handles it correctly if it runs again
+        request.instruction = effective_instruction
+        
+        # Re-detect the task using the updated instruction (which now contains explicit filenames)
+        router = TaskRouterAgent()
+        updated_task = router.detect(effective_instruction, task if task != "project_explain" else None)
+        
+        has_selection = infer_has_selection(request, updated_task)
+        explanation_scope = infer_explanation_scope(request, updated_task, has_selection=has_selection)
         selected_code_primary = bool(has_selection and request.code.strip() and explanation_scope != "project")
+        
+        # 4. Record this turn in the conversation memory
+        turn = ConversationTurn(
+            user_intent=request.instruction,
+            task=updated_task,
+            active_file=request.file_path,
+            files_referenced=explicit_files or resolved_refs
+        )
+        memory_store.add_turn(project_path, turn)
+        
         return RequestContext(
-            task=task,
+            task=updated_task,
             language=language,
-            instruction=request.instruction,
+            instruction=effective_instruction,
             code=request.code,
             file_path=request.file_path,
-            project_path=request.project_path,
+            project_path=project_path,
             imports=[],
             explanation_scope=explanation_scope,
             has_selection=has_selection,

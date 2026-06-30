@@ -60,8 +60,8 @@ def test_ollama_request_keeps_model_warm_and_uses_options(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def read(self):
-            return b'{"response": "ok"}'
+        def __iter__(self):
+            yield b'{"response": "ok", "done": true}'
 
     def fake_urlopen(request, timeout):
         captured["payload"] = json.loads(request.data.decode("utf-8"))
@@ -79,9 +79,11 @@ def test_ollama_request_keeps_model_warm_and_uses_options(monkeypatch):
 
 
 def test_generation_options_are_task_specific():
-    assert default_generation_options("auto_complete").max_tokens == 64
+    # Only temperature varies by task now, max_tokens is dynamic based on budget
     assert default_generation_options("auto_complete").temperature == 0.1
-    assert default_generation_options("perf_opt").max_tokens == 192
-    assert default_generation_options("test_gen").max_tokens == 384
-    assert default_generation_options("project_explain").max_tokens == 300
     assert default_generation_options("code_gen").temperature == 0.2
+    
+    # Check that generation budget dynamically calculates
+    options = default_generation_options("auto_complete", prompt="print(1)")
+    assert options.max_tokens > 1000
+    assert options.metadata["prompt_tokens"] > 0

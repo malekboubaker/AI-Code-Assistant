@@ -209,13 +209,13 @@ class QdrantStore:
                     query_filter = Filter(
                         must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
                     )
-                hits = self._client.search(
+                hits = self._client.query_points(
                     collection_name=self.collection_name,
-                    query_vector=vector,
+                    query=vector,
                     limit=top_k,
                     with_payload=True,
                     query_filter=query_filter,
-                )
+                ).points
                 return [
                     {"id": str(hit.id), "score": float(hit.score), "payload": dict(hit.payload or {})}
                     for hit in hits

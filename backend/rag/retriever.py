@@ -8,6 +8,7 @@ from backend.config.settings import settings
 from backend.rag.embedder import LocalEmbedder
 from backend.rag.project_identity import normalize_project_path, project_id_for_path
 from backend.rag.qdrant_store import QdrantStore
+from backend.rag.file_matching import extract_requested_entities, matches_entity
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class Retriever:
         active_file: str | None = None,
         project_path: str | None = None,
         task: str | None = None,
+        explanation_scope: str | None = None,
     ) -> list[RagSource]:
         project_id = project_id_for_path(project_path) if project_path else None
         normalized_project_path = normalize_project_path(project_path) if project_path else None
@@ -55,7 +57,26 @@ class Retriever:
             project_id=project_id,
         )
         project_map_hits = self._project_map_hits(query, project_id=project_id)
-        overview_hits = self._project_overview_hits(project_id, project_map_hits) if task == "project_explain" else []
+        wants_project_overview = task == "project_explain" or explanation_scope == "project"
+        overview_hits = self._hierarchical_project_report_hits(project_id, project_map_hits) if wants_project_overview else []
+        
+        # Exact File Resolution for compare and file_explain tasks
+        exact_hits = []
+        requested_entities = extract_requested_entities(query)
+        if task in ("compare", "file_explain") and requested_entities:
+            logger.info("Exact file resolution triggered for entities: %s", requested_entities)
+            # Fetch candidates from the store. We fetch heavily to ensure we find all files.
+            candidates = self.store.keyword_search([], [], limit=1000, project_id=project_id)
+            for entity in requested_entities:
+                if entity.kind != "file":
+                    continue
+                # Find all chunks belonging to this exact file
+                file_chunks = [hit for hit in candidates if matches_entity(hit.get("payload", {}), entity)]
+                if file_chunks:
+                    exact_hits.extend(file_chunks)
+            if exact_hits:
+                logger.info("Exact file resolution found %s chunks", len(exact_hits))
+                
         logger.info(
             (
                 "Retriever candidates: semantic_hits=%s keyword_hits=%s project_map_hits=%s "
@@ -70,7 +91,13 @@ class Retriever:
             terms,
             sorted(file_fragments),
         )
-        hits = project_map_hits + overview_hits + semantic_hits + keyword_hits
+        
+        if exact_hits:
+            hits = exact_hits
+        elif wants_project_overview:
+            hits = project_map_hits + overview_hits
+        else:
+            hits = project_map_hits + semantic_hits + keyword_hits
         filtered_hits = [hit for hit in hits if hit.get("payload", {}).get("project_id") == project_id]
         ranked_hits = self._rank_hits(query, hits, language=language, active_file=active_file)
         sources: list[RagSource] = []
@@ -106,7 +133,7 @@ class Retriever:
                     metadata=metadata,
                 )
             )
-            if len(sources) >= requested_top_k:
+            if not wants_project_overview and len(sources) >= requested_top_k:
                 break
         self.last_diagnostics = {
             "project_id": project_id,
@@ -193,39 +220,93 @@ class Retriever:
             hits.append({"id": row.get("id"), "score": project_map_score(payload, query), "payload": payload})
         return hits[:1]
 
-    def _project_overview_hits(self, project_id: str, project_map_hits: list[dict]) -> list[dict]:
+    def _hierarchical_project_report_hits(self, project_id: str, project_map_hits: list[dict]) -> list[dict]:
         project_map = {}
         if project_map_hits:
             project_map = project_map_hits[0].get("payload", {}).get("project_map") or {}
+        
         important = set(project_map.get("important_files", []) if isinstance(project_map, dict) else [])
         entry_points = set(project_map.get("entry_points", []) if isinstance(project_map, dict) else [])
         config_files = set(project_map.get("config_files", []) if isinstance(project_map, dict) else [])
         docs = set(project_map.get("documentation_files", []) if isinstance(project_map, dict) else [])
-        wanted_paths = important | entry_points | config_files | docs
-        rows = self.store.scroll_payload_rows(limit=1200, project_id=project_id)
-        hits = []
+        
+        rows = self.store.scroll_payload_rows(limit=1500, project_id=project_id)
+        
+        readmes = []
+        folder_summaries = []
+        file_summaries = []
+        raw_code = []
+        
         for row in rows:
             payload = row.get("payload", {})
-            if payload.get("source") != "project_code":
+            if payload.get("project_id") != project_id:
                 continue
-            relative = str(payload.get("relative_file_path") or payload.get("relative_path") or "")
-            if (
-                payload.get("is_doc_file")
-                or payload.get("is_config_file")
-                or payload.get("is_entry_point")
-                or relative in wanted_paths
-            ):
-                score = 0.66
-                if relative in entry_points:
-                    score += 0.08
-                if payload.get("is_doc_file"):
-                    score += 0.04
-                if payload.get("is_config_file"):
-                    score += 0.03
-                hits.append({"id": row.get("id"), "score": min(score, 0.82), "payload": payload})
-            if len(hits) >= 20:
-                break
-        return hits
+                
+            chunk_type = payload.get("chunk_type")
+            rel = str(payload.get("relative_file_path") or payload.get("relative_path") or "")
+            score = 1.0
+            
+            if chunk_type == "folder_summary":
+                folder_summaries.append({"id": row.get("id"), "score": score, "payload": payload})
+            elif chunk_type == "file_summary":
+                if rel in entry_points: score = 0.95
+                elif rel in important: score = 0.90
+                elif payload.get("is_config_file"): score = 0.85
+                elif payload.get("importance_score", 0) > 0.5: score = 0.80
+                else: score = 0.60
+                file_summaries.append({"id": row.get("id"), "score": score, "payload": payload})
+            elif chunk_type == "doc" and (rel.lower().startswith("readme") or rel.lower().endswith("readme.md")):
+                readmes.append({"id": row.get("id"), "score": 1.0, "payload": payload})
+            elif payload.get("source") == "project_code":
+                if rel in entry_points: score = 0.70
+                elif rel in important: score = 0.65
+                else: score = 0.50
+                raw_code.append({"id": row.get("id"), "score": score, "payload": payload})
+                
+        # Sort collections by score
+        file_summaries.sort(key=lambda x: x["score"], reverse=True)
+        raw_code.sort(key=lambda x: x["score"], reverse=True)
+        
+        # Adaptive Context Budget: Stop around ~25,000 characters
+        MAX_CHARS = 25000
+        current_chars = 0
+        if project_map_hits:
+            current_chars += len(str(project_map_hits[0].get("payload", {}).get("content", "")))
+            
+        final_hits = []
+        
+        def _add_if_fits(collection, take_all=False, limit=None):
+            nonlocal current_chars
+            added = 0
+            for hit in collection:
+                if limit and added >= limit:
+                    break
+                content_len = len(str(hit.get("payload", {}).get("content", "")))
+                if not take_all and current_chars + content_len > MAX_CHARS:
+                    continue
+                final_hits.append(hit)
+                current_chars += content_len
+                added += 1
+
+        # Strict Hierarchy
+        _add_if_fits(readmes, limit=1)
+        _add_if_fits(folder_summaries, take_all=True) # Always include folder summaries
+        _add_if_fits(file_summaries) # Fill rest with file summaries
+        
+        # Only if we have massive room (very small project) do we add raw code
+        _add_if_fits(raw_code)
+        
+        seen = set()
+        deduped = []
+        for h in final_hits:
+            fpath = h.get("payload", {}).get("file_path")
+            # If it's a folder summary, use its chunk ID instead of file_path
+            if h.get("payload", {}).get("chunk_type") == "folder_summary":
+                fpath = h.get("id")
+            if fpath not in seen:
+                seen.add(fpath)
+                deduped.append(h)
+        return deduped
 
 
 def extract_query_symbols(query: str) -> list[str]:

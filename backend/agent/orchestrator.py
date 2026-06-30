@@ -67,6 +67,17 @@ class AgentOrchestrator:
         self.response_formatter = ResponseFormatterAgent()
 
     def run(self, request: GenerateRequest) -> GenerateResponse:
+        import json
+        for chunk in self.stream_run(request):
+            if not chunk.strip():
+                continue
+            data = json.loads(chunk)
+            if data.get("type") == "result":
+                return GenerateResponse(**data["payload"])
+        raise RuntimeError("stream_run did not yield a result")
+
+    def stream_run(self, request: GenerateRequest):
+        import json
         total_start = perf_counter()
 
         step_start = perf_counter()
@@ -148,13 +159,22 @@ class AgentOrchestrator:
         prompt = self.prompt_builder.build(context, rag)
         timing_prompt_ms = _elapsed_ms(step_start)
 
+        yield json.dumps({"type": "stream_start", "payload": {"responseId": request.response_id}}) + "\n"
+
         step_start = perf_counter()
-        raw_output = self.model_provider.generate(prompt, default_generation_options(context.task))
+        options = default_generation_options(context.task, request.response_id, prompt=prompt)
+        chunks = []
+        for chunk in self.model_provider.stream_generate(prompt, options):
+            chunks.append(chunk)
+            yield json.dumps({"type": "stream_token", "payload": {"responseId": request.response_id, "content": chunk}}) + "\n"
+        
+        raw_output = "".join(chunks)
         timing_model_ms = _elapsed_ms(step_start)
 
         formatted = self.response_formatter.extract(raw_output, context)
         grounding_metadata: dict[str, object] = {}
         if context.task == "project_explain" and context.explanation_scope == "project":
+            from backend.agent.orchestrator import _enforce_project_explain_grounding
             grounded_output, blocked_terms = _enforce_project_explain_grounding(formatted.explanation, rag.sources)
             if blocked_terms:
                 raw_output = grounded_output
@@ -192,6 +212,8 @@ class AgentOrchestrator:
         )
         timing_metadata.update(self._rag_metadata(rag, context, rag_requested=rag_enabled))
         timing_metadata.update(grounding_metadata)
+        if hasattr(options, "metadata") and isinstance(options.metadata, dict):
+            timing_metadata.update(options.metadata)
         response = self.response_formatter.format(raw_output, context, rag, validation, stored, timing_metadata)
         response.metadata["timing_total_ms"] = _elapsed_ms(total_start)
         logger.info(
@@ -213,7 +235,7 @@ class AgentOrchestrator:
             timing_metadata["generated_length_chars"],
         )
         logger.debug("Validation result for task=%s: %s", context.task, validation.model_dump())
-        return response
+        yield json.dumps({"type": "result", "payload": response.model_dump()}) + "\n"
 
     def _base_metadata(
         self,

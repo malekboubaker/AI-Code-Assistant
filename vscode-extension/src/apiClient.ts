@@ -10,7 +10,9 @@ export type BackendTask =
   | 'perf_opt'
   | 'test_gen'
   | 'explain'
-  | 'project_explain';
+  | 'project_explain'
+  | 'file_explain'
+  | 'compare';
 
 export interface GenerateRequest {
   instruction: string;
@@ -23,6 +25,7 @@ export interface GenerateRequest {
   surrounding_context?: string;
   chat_history?: ChatHistoryMessage[];
   use_rag: boolean;
+  response_id?: string;
 }
 
 export interface ChatHistoryMessage {
@@ -49,6 +52,13 @@ export interface RagSource {
   metadata?: Record<string, unknown>;
 }
 
+export interface WorkspaceEdit {
+  file_path: string;
+  reason?: string;
+  original_content?: string;
+  new_content: string;
+}
+
 export interface GenerateResponse {
   task: BackendTask;
   language: string;
@@ -58,6 +68,7 @@ export interface GenerateResponse {
   used_rag: boolean;
   rag_sources: RagSource[];
   validation: ValidationResult;
+  edits?: WorkspaceEdit[];
   metadata: Record<string, unknown>;
 }
 
@@ -109,6 +120,92 @@ export class ApiClient {
   async generate(request: GenerateRequest): Promise<GenerateResponse> {
     const response = await postJson(this.endpoint, request, this.timeoutMs);
     return validateGenerateResponse(response);
+  }
+
+  streamGenerate(request: GenerateRequest, onEvent: (event: any) => void): Promise<GenerateResponse> {
+    const url = new URL(`${this.apiBaseUrl}/generate/stream`);
+    const data = Buffer.from(JSON.stringify(request), 'utf8');
+    const transport = url.protocol === 'https:' ? https : http;
+
+    return new Promise((resolve, reject) => {
+      const req = transport.request(
+        {
+          method: 'POST',
+          hostname: url.hostname,
+          port: url.port,
+          path: `${url.pathname}${url.search}`,
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': data.length,
+          },
+          timeout: this.timeoutMs,
+        },
+        (res) => {
+          if (!res.statusCode || res.statusCode >= 400) {
+            let body = '';
+            res.on('data', (chunk) => { body += chunk.toString('utf8'); });
+            res.on('end', () => reject(new Error(`Backend streaming error (${res.statusCode}): ${body}`)));
+            return;
+          }
+
+          let buffer = '';
+          res.on('data', (chunk) => {
+            buffer += chunk.toString('utf8');
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const event = JSON.parse(line);
+                if (event.type === 'result') {
+                  try {
+                    resolve(validateGenerateResponse(event.payload));
+                  } catch (valErr) {
+                    reject(valErr);
+                  }
+                } else {
+                  onEvent(event);
+                }
+              } catch (e) {
+                // Ignore JSON parse errors for incomplete lines, they are handled by the buffer.
+              }
+            }
+          });
+
+          res.on('end', () => {
+            if (buffer.trim()) {
+              try {
+                const event = JSON.parse(buffer);
+                if (event.type === 'result') {
+                  try {
+                    resolve(validateGenerateResponse(event.payload));
+                  } catch (valErr) {
+                    reject(valErr);
+                  }
+                } else onEvent(event);
+              } catch (e) {
+                reject(new Error("Stream ended with incomplete or invalid JSON: " + buffer));
+              }
+            } else {
+              reject(new Error("Stream ended without a final result payload."));
+            }
+          });
+        }
+      );
+
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error(`Backend request timed out after ${this.timeoutMs} ms.`));
+      });
+      
+      req.write(data);
+      req.end();
+    });
+  }
+
+  async cancelRequest(responseId: string): Promise<void> {
+    await postJson(`${this.apiBaseUrl}/cancel/${encodeURIComponent(responseId)}`, {}, this.timeoutMs);
   }
 
   async getRagStatus(projectPath: string): Promise<RagStatusResponse> {

@@ -14,7 +14,9 @@ from backend.api.schemas import (
     RagResetRequest,
     RagResetResponse,
     RagStatusResponse,
+    CancelResponse,
 )
+from backend.api import cancellation
 from backend.config.settings import settings
 from backend.rag.indexer import index_project, index_project_report, reset_project_index
 from backend.rag.qdrant_store import QdrantStore
@@ -34,15 +36,34 @@ def health() -> HealthResponse:
     )
 
 
+from fastapi.responses import StreamingResponse
+
 @router.post("/generate", response_model=GenerateResponse)
 def generate(request: GenerateRequest) -> GenerateResponse:
     return orchestrator.run(request)
+
+@router.post("/generate/stream")
+def generate_stream(request: GenerateRequest) -> StreamingResponse:
+    return StreamingResponse(
+        orchestrator.stream_run(request),
+        media_type="application/x-ndjson"
+    )
 
 
 @router.post("/complete", response_model=GenerateResponse)
 def complete(request: GenerateRequest) -> GenerateResponse:
     request.task = "auto_complete"
     return orchestrator.run(request)
+
+
+@router.post("/cancel/{response_id}", response_model=CancelResponse)
+def cancel(response_id: str) -> CancelResponse:
+    success = cancellation.cancel_request(response_id)
+    return CancelResponse(
+        status="success" if success else "not_found",
+        message=f"Request {response_id} cancelled." if success else "Request not found."
+    )
+
 
 
 @router.post("/index", response_model=IndexResponse)

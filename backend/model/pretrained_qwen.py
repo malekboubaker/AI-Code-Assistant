@@ -5,6 +5,7 @@ import logging
 import urllib.error
 import urllib.request
 
+from backend.api import cancellation
 from backend.config.settings import settings
 from backend.model.base import GenerationOptions, ModelProvider
 
@@ -42,45 +43,121 @@ class PretrainedQwenProvider(ModelProvider):
             logger.error("Ollama returned empty response for task=%s after retry; no fallback code will be generated.", task)
         return response_text.strip()
 
+    def stream_generate(self, prompt: str, options: GenerationOptions | None = None):
+        options = options or GenerationOptions()
+        task = self._task_from_prompt(prompt)
+        prepared_prompt = self._prepare_prompt(prompt, task)
+        yield from self._stream_once(prepared_prompt, options)
+
     def _generate_once(self, prompt: str, options: GenerationOptions) -> str:
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "think": False,
-            "keep_alive": "30m",
-            "options": {
-                "num_predict": options.max_tokens,
-                "temperature": options.temperature,
-                "top_p": options.top_p,
-            },
-        }
-        request = urllib.request.Request(
-            f"{self.base_url}/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            logger.debug("Final prompt sent to Ollama model=%s:\n%s", self.model, prompt)
-            logger.debug("Ollama stop sequences disabled for this request.")
-            with urllib.request.urlopen(request, timeout=300) as response:
-                raw_body = response.read().decode("utf-8")
-                logger.debug("Raw Ollama HTTP body: %s", raw_body)
-                body = json.loads(raw_body)
-                raw_response = body.get("response", "")
-                if raw_response is None:
-                    raw_response = ""
-                response_text = str(raw_response)
-                logger.debug("Raw response returned by Ollama: %r", response_text)
-                if not response_text.strip():
-                    self._log_empty_response_body(body)
-                return response_text
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise RuntimeError(
-                "Local Ollama model is not reachable. Start Ollama and pull the configured model "
-                f"({self.model})."
-            ) from exc
+        return "".join(self._stream_once(prompt, options))
+
+    def _remove_overlap(self, suffix: str, prefix: str) -> str:
+        """Finds the longest overlap where the end of 'suffix' matches the start of 'prefix'."""
+        max_overlap = min(len(suffix), len(prefix))
+        for i in range(max_overlap, 0, -1):
+            if suffix[-i:] == prefix[:i]:
+                return prefix[i:]
+        return prefix
+
+    def _stream_once(self, prompt: str, options: GenerationOptions):
+        continuation_limit = getattr(settings, "continuation_limit", 3)
+        current_prompt = prompt
+        accumulated_response = ""
+        continuation_count = 0
+        hit_length_limit = False
+
+        while continuation_count <= continuation_limit:
+            payload = {
+                "model": self.model,
+                "prompt": current_prompt,
+                "stream": True,
+                "think": False,
+                "keep_alive": "30m",
+                "options": {
+                    "num_predict": options.max_tokens,
+                    "temperature": options.temperature,
+                    "top_p": options.top_p,
+                    "num_ctx": getattr(settings, "model_context_window", 32768),
+                },
+            }
+            request = urllib.request.Request(
+                f"{self.base_url}/api/generate",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            
+            hit_length_limit = False
+            this_round_output = ""
+            buffer = ""
+            buffering = continuation_count > 0
+
+            try:
+                if continuation_count == 0:
+                    logger.debug("Final prompt sent to Ollama model=%s:\n%s", self.model, current_prompt)
+                else:
+                    logger.debug("Continuation prompt sent to Ollama. Length so far: %d", len(accumulated_response))
+
+                with urllib.request.urlopen(request, timeout=300) as response:
+                    for line in response:
+                        if line:
+                            chunk = json.loads(line.decode("utf-8"))
+                            if chunk.get("response"):
+                                text = chunk["response"]
+                                if buffering:
+                                    buffer += text
+                                    if len(buffer) > 60:
+                                        tail = accumulated_response[-200:] if len(accumulated_response) > 200 else accumulated_response
+                                        stripped_buffer = self._remove_overlap(tail, buffer)
+                                        this_round_output += stripped_buffer
+                                        yield stripped_buffer
+                                        buffering = False
+                                        buffer = ""
+                                else:
+                                    this_round_output += text
+                                    yield text
+                            
+                            if chunk.get("done"):
+                                if buffering:
+                                    tail = accumulated_response[-200:] if len(accumulated_response) > 200 else accumulated_response
+                                    stripped_buffer = self._remove_overlap(tail, buffer)
+                                    this_round_output += stripped_buffer
+                                    yield stripped_buffer
+                                    buffering = False
+
+                                done_reason = chunk.get("done_reason", "stop")
+                                if done_reason == "length":
+                                    hit_length_limit = True
+
+                            if options.response_id and cancellation.is_cancelled(options.response_id):
+                                logger.info("Generation cancelled for response_id %s", options.response_id)
+                                return
+
+            except (urllib.error.URLError, TimeoutError) as exc:
+                raise RuntimeError(
+                    "Local Ollama model is not reachable. Start Ollama and pull the configured model "
+                    f"({self.model})."
+                ) from exc
+
+            accumulated_response += this_round_output
+
+            if not hit_length_limit:
+                break
+                
+            continuation_count += 1
+            if continuation_count <= continuation_limit:
+                logger.info("Generation reached length limit. Triggering continuation %d/%d", continuation_count, continuation_limit)
+                current_prompt = (
+                    f"{prompt}\n\n"
+                    f"[Assistant's partial response so far]:\n{accumulated_response}\n\n"
+                    f"Please CONTINUE EXACTLY where you left off. Do not repeat the last sentence. Start immediately with the next words."
+                )
+
+        if isinstance(options.metadata, dict):
+            options.metadata["continuation_count"] = continuation_count
+            options.metadata["generated_length"] = len(accumulated_response)
+            options.metadata["completion_reason"] = "length" if hit_length_limit else "stop"
 
     def _task_from_prompt(self, prompt: str) -> str | None:
         for task in CODE_TASKS | {"project_explain"}:
@@ -124,6 +201,7 @@ class PretrainedQwenProvider(ModelProvider):
             max_tokens=max(options.max_tokens, min_tokens),
             temperature=options.temperature,
             top_p=options.top_p,
+            response_id=options.response_id,
         )
 
     def _extract_section(self, prompt: str, heading: str) -> str:

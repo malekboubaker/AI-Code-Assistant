@@ -110,7 +110,7 @@
         },
         "aiCodeAssistant.timeoutMs": {
           "type": "number",
-          "default": 120000,
+          "default": 300000,
           "description": "Timeout for localhost backend requests in milliseconds."
         },
         "aiCodeAssistant.chat.useRag": {

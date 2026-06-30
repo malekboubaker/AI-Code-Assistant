@@ -23,6 +23,8 @@ class Settings:
     rag_threshold: float = float(os.getenv("RAG_THRESHOLD", "0.60"))
     max_generation_tokens: int = int(os.getenv("MAX_GENERATION_TOKENS", "768"))
     temperature: float = float(os.getenv("GENERATION_TEMPERATURE", "0.2"))
+    continuation_limit: int = int(os.getenv("CONTINUATION_LIMIT", "3"))
+    model_context_window: int = int(os.getenv("MODEL_CONTEXT_WINDOW", "32768"))
 
 
 settings = Settings()

@@ -10,6 +10,9 @@ class FakeModel:
     def generate(self, prompt, options=None):
         return "def add(a, b):\n    return a + b\n"
 
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
+
 
 class TaskAwareCodeModel:
     name = "task-aware-code"
@@ -24,6 +27,9 @@ class TaskAwareCodeModel:
         if "[TASK: test_gen]" in prompt:
             return "def test_add_positive_numbers():\n    assert add(2, 3) == 5\n"
         return "def generated():\n    return True\n"
+
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
 
 
 class MultiLanguageModel:
@@ -49,6 +55,9 @@ class MultiLanguageModel:
             return "public int Calculate(int value)\n{\n    return value * value;\n}\n"
         return ""
 
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
+
 
 class FakeMemory:
     def maybe_store(self, *args, **kwargs):
@@ -64,6 +73,9 @@ class OptionCapturingModel:
     def generate(self, prompt, options=None):
         self.options = options
         return "a + b\n"
+
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
 
 
 class FailingRetriever:
@@ -292,6 +304,9 @@ class GoodTestModel:
             "    assert add(-2, -3) == -5\n"
         )
 
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
+
 
 def test_orchestrator_test_gen_returns_pytest_code():
     orchestrator = AgentOrchestrator()
@@ -316,6 +331,9 @@ class MarkdownModel:
 
     def generate(self, prompt, options=None):
         return "```python\ndef calc(x):\n    return [i * i for i in x]\n```\n\n**Explanation:** cleaner"
+
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
 
 
 def test_orchestrator_extracts_code_from_markdown():
@@ -343,6 +361,9 @@ class EmptyModel:
     def generate(self, prompt, options=None):
         return ""
 
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
+
 
 def test_orchestrator_empty_output_is_invalid_and_not_fallback():
     orchestrator = AgentOrchestrator()
@@ -366,6 +387,9 @@ class PromptCapturingModel:
     def generate(self, prompt, options=None):
         self.prompt = prompt
         return "def routed():\n    return True\n"
+
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
 
 
 class RelevantRetriever:
@@ -489,6 +513,9 @@ class ExplanationModel:
             "the assembled context to PromptBuilderAgent to create the prompt."
         )
 
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
+
 
 class PlainExplanationModel:
     name = "plain-explain"
@@ -499,6 +526,9 @@ class PlainExplanationModel:
     def generate(self, prompt, options=None):
         self.prompt = prompt
         return "The requested code is explained using the provided local context."
+
+    def stream_generate(self, prompt, options=None):
+        yield self.generate(prompt, options)
 
 
 class CapturingProjectRetriever:

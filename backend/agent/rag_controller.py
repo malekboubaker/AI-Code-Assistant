@@ -42,6 +42,7 @@ class RagControllerAgent:
         active_file: str | None = None,
         project_path: str | None = None,
         task: str | None = None,
+        explanation_scope: str | None = None,
     ) -> RagDecision:
         project_id = project_id_for_path(project_path) if project_path else None
         normalized_project_path = normalize_project_path(project_path) if project_path else None
@@ -89,6 +90,7 @@ class RagControllerAgent:
                 active_file=active_file,
                 project_path=project_path,
                 task=task,
+                explanation_scope=explanation_scope,
             )
         except TypeError:
             results = self.retriever.search(query, top_k=settings.rag_top_k)
@@ -104,8 +106,11 @@ class RagControllerAgent:
             settings.rag_threshold,
             len(results),
         )
+        project_scope_explain = task == "project_explain" and (
+            explanation_scope is None or explanation_scope == "project"
+        )
         if results and results[0].score >= settings.rag_threshold:
-            if task == "project_explain" and not project_map_exists and reliable_source_count <= 0:
+            if project_scope_explain and not project_map_exists and reliable_source_count <= 0:
                 return RagDecision(
                     use_rag=False,
                     sources=results,
@@ -164,21 +169,37 @@ class RagControllerAgent:
         )
 
     def _format_context(self, sources: list[RagSource]) -> str:
+        # Sort project_map to the very top so the LLM gets the macro-architecture first
+        sorted_sources = sorted(
+            sources,
+            key=lambda s: 0 if (s.metadata.get("source") == "project_map" or s.chunk_type == "project_map") else 1
+        )
+        
         blocks = []
-        for source in sources:
+        for source in sorted_sources:
             if source.metadata.get("source") == "project_map" or source.chunk_type == "project_map":
                 blocks.append(
-                    "### Project map summary\n"
-                    f"score: {source.score:.3f}\n"
-                    f"{_trim_context(source.content, 2400)}"
+                    f'<source type="project_map" score="{source.score:.3f}">\n'
+                    f'{_trim_context(source.content, 2400)}\n'
+                    '</source>'
                 )
                 continue
-            location = f"{source.file_path}:{source.start_line}-{source.end_line}"
+            
+            symbol = source.symbol_name or "unknown"
+            chunk_type = source.chunk_type or "unknown"
+            
+            if chunk_type in ("folder_summary", "file_summary"):
+                blocks.append(
+                    f'<source file="{source.file_path}" type="{chunk_type}" score="{source.score:.3f}">\n'
+                    f'{_trim_context(source.content, 6000)}\n'
+                    '</source>'
+                )
+                continue
+
             blocks.append(
-                f"### Retrieved chunk ({location})\n"
-                f"symbol: {source.symbol_name or 'unknown'} | score: {source.score:.3f}\n"
-                f"metadata: type={source.chunk_type or 'unknown'} folder={source.metadata.get('folder', 'unknown')}\n"
-                f"```{source.language or ''}\n{_trim_context(source.content, 6000)}\n```"
+                f'<source file="{source.file_path}" lines="{source.start_line}-{source.end_line}" symbol="{symbol}" type="{chunk_type}" score="{source.score:.3f}">\n'
+                f'```{source.language or ""}\n{_trim_context(source.content, 6000)}\n```\n'
+                '</source>'
             )
         return "\n\n".join(blocks)
 

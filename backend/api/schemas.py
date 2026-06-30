@@ -15,6 +15,8 @@ TaskName = Literal[
     "refactoring",
     "explain",
     "project_explain",
+    "file_explain",
+    "compare",
 ]
 
 LanguageName = Literal["python", "javascript", "typescript", "java", "cpp", "csharp", "rust"]
@@ -26,6 +28,7 @@ class ChatHistoryMessage(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    response_id: str | None = None
     instruction: str = Field(..., description="User instruction or question.")
     code: str = Field("", description="Selected/current code.")
     task: TaskName | None = None
@@ -74,6 +77,13 @@ class ValidationResult(BaseModel):
     duration_ms: int = 0
 
 
+class WorkspaceEdit(BaseModel):
+    file_path: str
+    reason: str = ""
+    original_content: str | None = None
+    new_content: str
+
+
 class GenerateResponse(BaseModel):
     task: TaskName
     language: str
@@ -83,8 +93,22 @@ class GenerateResponse(BaseModel):
     used_rag: bool = False
     rag_sources: list[RagSource] = Field(default_factory=list)
     validation: ValidationResult
+    edits: list[WorkspaceEdit] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+
+class ProjectReportRequest(BaseModel):
+    project_path: str
+
+class ProjectReportResponse(BaseModel):
+    status: str
+    message: str | None = None
+    project_id: str
+    project_name: str
+    project_path: str
+    generated_at: str
+    duration_ms: int
+    report_markdown: str | None = None
 
 class IndexRequest(BaseModel):
     project_path: str
@@ -143,3 +167,8 @@ class HealthResponse(BaseModel):
     status: str
     model_provider: str
     qdrant_ready: bool
+
+
+class CancelResponse(BaseModel):
+    status: str
+    message: str

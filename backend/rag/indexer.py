@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import uuid
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,7 +116,77 @@ class ProjectIndexer:
                 point_id = _point_id(project_key, relative_path, chunk.payload)
                 self.store.upsert(vector, chunk.payload, point_id=point_id)
                 chunks_indexed += 1
+
+            # Build and insert static File Summary
+            if file_signal:
+                structs = analysis.structures.get(relative_path, {})
+                classes = [c[0] for c in structs.get("classes", [])]
+                functions = structs.get("functions", [])
+                imports = analysis.dependency_graph.get(relative_path, [])
+                
+                content_lines = [
+                    f"File: {relative_path}",
+                    f"Language: {file_signal.language}",
+                    f"Lines: {analysis.lines_of_code.get(relative_path, 0)}",
+                    f"Purpose: Source file."
+                ]
+                if classes:
+                    content_lines.append(f"Classes: {', '.join(classes)}")
+                if functions:
+                    content_lines.append(f"Functions: {', '.join(functions)}")
+                if imports:
+                    content_lines.append(f"Dependencies: {', '.join(imports)}")
+                
+                summary_content = "\n".join(content_lines)
+                summary_payload = {
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "project_path": normalized_project_path,
+                    "workspace_root": normalized_project_path,
+                    "file_path": str(path),
+                    "relative_file_path": relative_path,
+                    "relative_path": relative_path,
+                    "file_sha256": file_hash,
+                    "source": "project_code",
+                    "chunk_type": "file_summary",
+                    "content": summary_content,
+                    "importance_score": file_signal.importance_score,
+                }
+                vector = self.embedder.embed(_embedding_text(summary_payload))
+                point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{project_key}:{relative_path}:file_summary"))
+                self.store.upsert(vector, summary_payload, point_id=point_id)
+                chunks_indexed += 1
+
             files_reindexed += 1
+
+        # Build and insert static Folder Summaries
+        folder_map = defaultdict(list)
+        for path in scan.files:
+            rel = _relative_path(path, root)
+            folder = str(path.parent.relative_to(root)).replace("\\", "/")
+            if folder == ".":
+                folder = "root"
+            folder_map[folder].append(rel)
+
+        for folder, files_in_folder in folder_map.items():
+            content_lines = [f"Folder: {folder}", "Contains:"]
+            for f in files_in_folder:
+                content_lines.append(f"- {f}")
+            folder_content = "\n".join(content_lines)
+            folder_payload = {
+                "project_id": project_id,
+                "project_name": project_name,
+                "project_path": normalized_project_path,
+                "workspace_root": normalized_project_path,
+                "relative_path": folder,
+                "source": "project_code",
+                "chunk_type": "folder_summary",
+                "content": folder_content,
+            }
+            vector = self.embedder.embed(folder_content)
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{project_id}:{folder}:folder_summary"))
+            self.store.upsert(vector, folder_payload, point_id=point_id)
+            chunks_indexed += 1
 
         if not full:
             removed_files = set(previous_files) - set(current_files)

@@ -26,6 +26,8 @@ TASK_PREFIXES = {
     "test_gen": "[TASK: test_gen]",
     "refactoring": "[TASK: refactoring]",
     "project_explain": "[TASK: project_explain]",
+    "file_explain": "[TASK: file_explain]",
+    "compare": "[TASK: compare]",
 }
 
 
@@ -37,8 +39,9 @@ class PromptBuilderAgent:
             f"Language: {language_label}",
             f"File path: {context.file_path or 'unknown'}",
             "",
-            "You are a local AI code assistant.",
+            "You are a highly professional, expert AI code assistant.",
             f"Use idiomatic {language_label} and preserve the surrounding language/runtime conventions.",
+            "Always structure your answers clearly using Markdown headers and bullet points where appropriate.",
         ]
         if context.task == "project_explain":
             parts.extend(_project_explain_instructions(context.explanation_scope))
@@ -56,11 +59,24 @@ class PromptBuilderAgent:
         else:
             parts.extend(
                 [
-                    "Return executable code only.",
-                    "Do not use Markdown fences.",
-                    "Do not include explanation inside the code block/text.",
-                    "Do not include headings such as **Explanation:** in the code output.",
+                    "Return executable code only, unless explanation is strictly necessary.",
+                    "Do not use Markdown fences for the entire response.",
+                    "Do not include explanation inside the code block.",
                     "If explanation is needed, put it after a line that says exactly: Explanation:",
+                    "Keep explanations concise, professional, and directly relevant to the code changes.",
+                    "",
+                    "MULTI-FILE EDITS:",
+                    "If your changes span multiple files, you MUST output a comprehensive workspace plan using the following XML structure:",
+                    "<workspace_edits>",
+                    "  <edit file=\"path/to/file.py\">",
+                    "    <reason>Why this file must change (e.g., interface update)</reason>",
+                    "    <code>...new complete file content...</code>",
+                    "  </edit>",
+                    "  <!-- Repeat for each file -->",
+                    "</workspace_edits>",
+                    "If modifying multiple files, do NOT output raw code outside of these XML tags.",
+                    "If you are not confident about which related files need to change, ask the user for confirmation in the explanation before writing code.",
+                    "If you are ONLY modifying a single file, you may just return the raw code directly without these XML tags.",
                 ]
             )
         if context.chat_history:
@@ -91,9 +107,29 @@ class PromptBuilderAgent:
                 ]
             )
         elif context.task == "refactoring":
-            parts.extend(["", "Refactoring requirements:", "- Return only the refactored code.", "- Preserve behavior."])
+            parts.extend(["", "Refactoring requirements:", "- Return the complete refactored code.", "- Preserve behavior."])
         elif context.task == "perf_opt":
             parts.extend(["", "Performance optimization requirements:", "- Return only the optimized code.", "- Preserve behavior."])
+        elif context.task == "file_explain":
+            parts.extend([
+                "",
+                "FILE EXPLANATION REQUIREMENTS:",
+                "- Explain ONLY the requested file.",
+                "- Detail its purpose, responsibilities, main classes, main functions, how it interacts with the project, dependencies, and why it exists.",
+                "- Return descriptive prose explanation only.",
+                "- NEVER generate or rewrite source code.",
+                "- NEVER output code blocks or markdown fences unless explicitly answering a question about a snippet.",
+            ])
+        elif context.task == "compare":
+            parts.extend([
+                "",
+                "FILE COMPARISON REQUIREMENTS:",
+                "- Compare the retrieved files.",
+                "- Detail Purpose, Responsibilities, Inputs, Outputs, Classes, Functions, Dependencies, how they communicate, when each is used, why both exist, and advantages of separation.",
+                "- Do NOT explain unrelated files.",
+                "- Provide a structured response.",
+                "- Return descriptive prose only. NEVER generate or rewrite source code.",
+            ])
         if context.selected_code_primary and context.task != "project_explain":
             parts.extend(
                 [
@@ -108,9 +144,17 @@ class PromptBuilderAgent:
             parts.extend(
                 [
                     "",
-                    "Relevant local project context follows.",
-                    "Use it only if it is truly relevant; ignore it if it conflicts with the user request.",
+                    "## Retrieved Local Project Context",
+                    "The following XML block contains context retrieved from the user's project.",
+                    "CRITICAL INSTRUCTIONS:",
+                    "1. You MUST ground your answer using this retrieved context.",
+                    "2. When using information from a retrieved file, cite the file path naturally (e.g., 'According to `path/to/file.py`...').",
+                    "3. If the retrieved context does not contain enough information to answer the question, explicitly state that you lack sufficient context rather than making assumptions or inventing architecture.",
+                    "4. Ignore the context only if it completely conflicts with a specific user instruction.",
+                    "",
+                    "<context>",
                     rag.context,
+                    "</context>",
                 ]
             )
         code_label, current_code = _code_section(context)
@@ -137,7 +181,7 @@ class PromptBuilderAgent:
                 "",
                 (
                     "Return the final answer as prose explanation only. Avoid external APIs or cloud services."
-                    if context.task == "project_explain"
+                    if context.task in ("project_explain", "file_explain", "compare")
                     else (
                         "Return only the missing code to insert. Avoid external APIs or cloud services."
                         if context.task == "auto_complete"
@@ -161,26 +205,23 @@ def _project_explain_instructions(scope: str) -> list[str]:
     ]
     if scope == "project":
         return common + [
-            "Use only the retrieved project context.",
-            "Do not guess missing architecture.",
+            "Use only the retrieved project context to form your answer.",
+            "Do not guess or hallucinate missing architecture.",
             "Do not mention technologies unless they appear in the retrieved files.",
-            "If the retrieved context is insufficient, say that clearly.",
-            "Write a project-level explanation, not a single-file walkthrough.",
-            "Prioritize project map, README/docs, manifests/config files, entry points, important files, and representative modules.",
-            "Do not let the active editor file dominate the explanation unless the retrieved sources show it is the main project entry point.",
-            "Use this structure exactly:",
-            "A. Project goal",
-            "B. Main components",
-            "C. How it works",
-            "D. Main technologies",
-            "E. Expected input/output",
-            "F. Source-based notes",
+            "If the retrieved context is insufficient, state that clearly and professionally.",
+            "Write a comprehensive, professional project-level technical report.",
+            "Prioritize the project map summary, README/docs, config files, and main entry points.",
+            "Do not let the active editor file dominate the explanation unless it is the main project entry point.",
+            "Structure your report professionally using Markdown headers. You may use the following sections as a guide if applicable:",
+            "## Project Overview",
+            "## Architecture & Main Components",
+            "## Key Technologies",
+            "## Execution Flow",
+            "## Observations",
             "Grounding rules:",
-            "- Use only retrieved project context.",
+            "- Cite specific file paths naturally in your report when explaining components.",
             "- Do not invent architecture.",
-            "- Do not mention a technology unless it appears in retrieved sources.",
-            "- If only one file was retrieved, say: \"Based on the available indexed context...\"",
-            "- If the project overview is incomplete, say what context is missing.",
+            "- If the project overview is incomplete based on the context, state what context appears to be missing.",
             "- Do not mention Qdrant, RAG, vector databases, or the AI Code Assistant infrastructure unless those technologies exist in the target project sources.",
         ]
     if scope == "file":

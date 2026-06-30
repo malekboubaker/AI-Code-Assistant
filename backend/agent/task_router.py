@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from backend.api.schemas import TaskName
+from backend.rag.file_matching import extract_file_references
 
 
 EXPLAIN_PREFIXES = (
@@ -16,6 +17,8 @@ EXPLAIN_PREFIXES = (
 
 
 KEYWORDS: list[tuple[str, TaskName]] = [
+    ("compare", "compare"),
+    ("difference", "compare"),
     ("autocomplete", "auto_complete"),
     ("complete", "auto_complete"),
     ("fix", "bug_fix"),
@@ -27,6 +30,7 @@ KEYWORDS: list[tuple[str, TaskName]] = [
     ("performance", "perf_opt"),
     ("generate", "code_gen"),
     ("write", "code_gen"),
+    ("explain", "project_explain"),
 ]
 
 SOURCE_LISTING_PATTERNS = (
@@ -45,11 +49,19 @@ class TaskRouterAgent:
                 return "project_explain"
             return explicit_task
         lower = instruction.lower()
-        if any(re.search(pattern, lower) for pattern in SOURCE_LISTING_PATTERNS):
-            return "project_explain"
-        if lower.strip().startswith(EXPLAIN_PREFIXES):
-            return "project_explain"
-        for keyword, task in KEYWORDS:
-            if keyword in lower:
-                return task
-        return "code_gen"
+        detected_task = "code_gen"
+        if lower.strip().startswith(EXPLAIN_PREFIXES) or any(re.search(pattern, lower) for pattern in SOURCE_LISTING_PATTERNS):
+            detected_task = "project_explain"
+        else:
+            for keyword, task in KEYWORDS:
+                if keyword in lower:
+                    detected_task = task
+                    break
+        
+        if detected_task == "project_explain":
+            if "this file" in lower or "the file" in lower or "this class" in lower or "this function" in lower:
+                return "file_explain"
+            if len(extract_file_references(instruction)) > 0:
+                return "file_explain"
+                
+        return detected_task

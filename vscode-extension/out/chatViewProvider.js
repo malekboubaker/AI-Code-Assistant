@@ -60,6 +60,9 @@ class ChatViewProvider {
     responseCounter = 0;
     lastBackendResponse;
     chatHistory = [];
+    currentClient;
+    currentResponseId;
+    lastReportText;
     pendingApply = new Map();
     previewProvider = new GeneratedCodePreviewProvider();
     constructor(extensionContext) {
@@ -76,7 +79,42 @@ class ChatViewProvider {
         webviewView.webview.onDidReceiveMessage((message) => {
             void this.handleMessage(message);
         });
+        this.extensionContext.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => this.sendEditorState()), vscode.window.onDidChangeTextEditorSelection(() => this.sendEditorState()));
+        this.sendEditorState();
         void this.checkRagStatus({ autoIndexIfNeeded: true });
+    }
+    sendEditorState() {
+        if (!this.webviewView) {
+            return;
+        }
+        const context = (0, contextCollector_1.collectEditorContext)();
+        const projectName = getWorkspaceProjectPath() ? path.basename(getWorkspaceProjectPath()) : 'Workspace';
+        let activeFile = 'No active file';
+        let activeFileRelative = '';
+        let hasSelection = false;
+        let selectionLabel = '';
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+            activeFile = path.basename(editor.document.fileName);
+            activeFileRelative = vscode.workspace.asRelativePath(editor.document.fileName);
+            hasSelection = !editor.selection.isEmpty;
+            if (hasSelection) {
+                const start = editor.selection.start.line + 1;
+                const end = editor.selection.end.line + 1;
+                selectionLabel = start === end ? `:${start}` : `:${start}-${end}`;
+                activeFile += selectionLabel;
+            }
+        }
+        this.postMessage({
+            type: 'editorState',
+            payload: {
+                projectName,
+                activeFile,
+                activeFileRelative,
+                hasSelection,
+                selectionLabel
+            }
+        });
     }
     async handleMessage(message) {
         try {
@@ -84,12 +122,79 @@ class ChatViewProvider {
                 await this.sendChatRequest(message.text);
                 return;
             }
+            if (message.type === 'stopGeneration') {
+                await this.stopGeneration();
+                return;
+            }
             if (message.type === 'apply') {
                 await this.applyGeneratedCode(message.responseId);
                 return;
             }
+            if (message.type === 'applyAll') {
+                await this.applyWorkspaceEdits(message.responseId);
+                return;
+            }
             if (message.type === 'checkRagStatus') {
                 await this.checkRagStatus();
+                return;
+            }
+            if (message.type === 'newConversation') {
+                this.chatHistory = [];
+                return;
+            }
+            if (message.type === 'generateReport') {
+                await this.generateProjectReport();
+                return;
+            }
+            if (message.type === 'requestEditorState') {
+                this.sendEditorState();
+                return;
+            }
+            if (message.type === 'openReport') {
+                const doc = await vscode.workspace.openTextDocument({
+                    content: this.lastReportText || 'No report generated yet.',
+                    language: 'markdown'
+                });
+                await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+                return;
+            }
+            if (message.type === 'copyText') {
+                await vscode.env.clipboard.writeText(message.text);
+                vscode.window.showInformationMessage('Copied to clipboard');
+                return;
+            }
+            if (message.type === 'openFile') {
+                const workspacePath = getWorkspaceProjectPath();
+                if (workspacePath) {
+                    const fullPath = path.isAbsolute(message.filePath) ? message.filePath : path.join(workspacePath, message.filePath);
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fullPath));
+                        const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+                        if (message.line) {
+                            const pos = new vscode.Position(message.line - 1, 0);
+                            editor.selection = new vscode.Selection(pos, pos);
+                            editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+                        }
+                    }
+                    catch (e) {
+                        console.error(`Failed to open file: ${fullPath}`, e);
+                    }
+                }
+                return;
+            }
+            if (message.type === 'openDiff') {
+                const pending = this.pendingApply.get(message.responseId);
+                if (pending && pending.response.diff) {
+                    const doc = await vscode.workspace.openTextDocument({
+                        content: pending.response.diff,
+                        language: 'diff'
+                    });
+                    await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+                }
+                return;
+            }
+            if (message.type === 'webviewError') {
+                console.error(`AI Code Assistant (Webview Error): ${message.message}`);
                 return;
             }
             if (message.type === 'indexProject') {
@@ -123,7 +228,11 @@ class ChatViewProvider {
             this.postError(formatBackendError(error));
             return;
         }
+        const responseId = this.nextResponseId();
+        this.currentClient = client;
+        this.currentResponseId = responseId;
         const request = {
+            response_id: responseId,
             instruction,
             code: editorContext.code,
             language: editorContext.language,
@@ -136,10 +245,16 @@ class ChatViewProvider {
             use_rag: useRag
         };
         try {
-            const response = await client.generate(request);
+            this.postMessage({ type: 'generatingStarted' });
+            const response = await client.streamGenerate(request, (event) => {
+                if (event.type === 'stream_start' || event.type === 'stream_token') {
+                    this.postMessage({ type: event.type, payload: event.payload });
+                }
+            });
+            this.currentClient = undefined;
+            this.currentResponseId = undefined;
             this.lastBackendResponse = response;
-            const responseId = this.nextResponseId();
-            if (response.generated_code.trim()) {
+            if (response.generated_code.trim() || (response.edits && response.edits.length > 0)) {
                 this.pendingApply.set(responseId, { context: editorContext, response });
             }
             this.rememberTurn(instruction, editorContext, response);
@@ -153,7 +268,19 @@ class ChatViewProvider {
             this.postMessage({ type: 'assistant', payload });
         }
         catch (error) {
+            this.currentClient = undefined;
+            this.currentResponseId = undefined;
             this.postError(formatBackendError(error));
+        }
+    }
+    async stopGeneration() {
+        if (this.currentClient && this.currentResponseId) {
+            try {
+                await this.currentClient.cancelRequest(this.currentResponseId);
+            }
+            catch (error) {
+                console.error('Failed to cancel generation:', error);
+            }
         }
     }
     postPreviousSources() {
@@ -202,6 +329,58 @@ class ChatViewProvider {
         }
         catch (error) {
             this.postMessage({ type: 'ragStatus', payload: { error: formatBackendError(error) } });
+        }
+    }
+    async generateProjectReport() {
+        const projectPath = getWorkspaceProjectPath();
+        if (!projectPath) {
+            this.postError('Cannot generate report: No workspace folder opened.');
+            return;
+        }
+        const config = vscode.workspace.getConfiguration('aiCodeAssistant');
+        const endpoint = config.get('backendUrl', 'http://localhost:8000/api/v1/generate');
+        const timeoutMs = config.get('timeoutMs', 120000);
+        let client;
+        try {
+            client = new apiClient_1.ApiClient(endpoint, timeoutMs);
+        }
+        catch (error) {
+            this.postError(formatBackendError(error));
+            return;
+        }
+        try {
+            this.postMessage({ type: 'reportGenerating' });
+            const startTime = Date.now();
+            const responseId = this.nextResponseId();
+            const request = {
+                response_id: responseId,
+                instruction: 'Generate a comprehensive technical report of this project based on the provided project map. Summarize the architecture, primary languages, frameworks, and key entry points.',
+                code: '',
+                language: '',
+                task: 'project_explain',
+                project_path: projectPath,
+                use_rag: true
+            };
+            const response = await client.streamGenerate(request, (event) => {
+                if (event.type === 'stream_start' || event.type === 'stream_token') {
+                    this.postMessage({ type: event.type, payload: event.payload });
+                }
+            });
+            this.lastReportText = response.explanation;
+            this.postMessage({
+                type: 'report',
+                payload: {
+                    responseId,
+                    summary: response.explanation,
+                    filesAnalyzed: response.rag_sources?.length || 0,
+                    ragEnabled: true,
+                    projectMapUsed: true,
+                    durationMs: Date.now() - startTime
+                }
+            });
+        }
+        catch (error) {
+            this.postError(`Failed to generate report: ${formatBackendError(error)}`);
         }
     }
     async indexProject(mode) {
@@ -283,6 +462,44 @@ class ChatViewProvider {
         }
         await this.previewAndApplyFullFile(pending.context, generatedCode);
     }
+    async applyWorkspaceEdits(responseId) {
+        const pending = this.pendingApply.get(responseId);
+        if (!pending || !pending.response || !pending.response.edits) {
+            this.postError('No workspace edits available to apply.');
+            return;
+        }
+        const edits = pending.response.edits;
+        const workspaceEdit = new vscode.WorkspaceEdit();
+        // Resolve the active project path dynamically from the context
+        const activeProjectPath = pending.context.projectPath;
+        const fallbackFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const basePath = activeProjectPath || fallbackFolder;
+        if (!basePath) {
+            this.postError('No workspace folder open.');
+            return;
+        }
+        for (const edit of edits) {
+            const uri = path.isAbsolute(edit.file_path)
+                ? vscode.Uri.file(edit.file_path)
+                : vscode.Uri.file(path.join(basePath, edit.file_path));
+            try {
+                const document = await vscode.workspace.openTextDocument(uri);
+                const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
+                workspaceEdit.replace(uri, fullRange, edit.new_content);
+            }
+            catch (err) {
+                workspaceEdit.createFile(uri, { ignoreIfExists: true });
+                workspaceEdit.insert(uri, new vscode.Position(0, 0), edit.new_content);
+            }
+        }
+        const success = await vscode.workspace.applyEdit(workspaceEdit);
+        if (success) {
+            this.postMessage({ type: 'applied', message: `Applied workspace edits across ${edits.length} files.` });
+        }
+        else {
+            this.postError('Failed to apply workspace edits.');
+        }
+    }
     async replaceSelection(context, generatedCode) {
         const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(context.documentUri));
         const editor = await vscode.window.showTextDocument(document, { preview: false });
@@ -337,7 +554,7 @@ class ChatViewProvider {
     createApiClient() {
         const config = vscode.workspace.getConfiguration('aiCodeAssistant');
         const endpoint = config.get('backendUrl', 'http://localhost:8000/api/v1/generate');
-        const timeoutMs = config.get('timeoutMs', 120000);
+        const timeoutMs = config.get('timeoutMs', 300000);
         return new apiClient_1.ApiClient(endpoint, timeoutMs);
     }
     rememberTurn(instruction, editorContext, response) {

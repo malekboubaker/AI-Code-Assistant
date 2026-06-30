@@ -110,7 +110,7 @@ async function runCommand(spec) {
     }
     const config = vscode.workspace.getConfiguration('aiCodeAssistant');
     const endpoint = config.get('backendUrl', 'http://localhost:8000/api/v1/generate');
-    const timeoutMs = config.get('timeoutMs', 120000);
+    const timeoutMs = config.get('timeoutMs', 300000);
     const useRagForCodeTasks = config.get('useRagForCodeTasks', false);
     const useRag = spec.useRagDefault || useRagForCodeTasks;
     let client;
